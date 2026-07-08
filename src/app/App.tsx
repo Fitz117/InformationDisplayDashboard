@@ -933,7 +933,7 @@ export default function App() {
         style={{ width: sidebarOpen ? "224px" : "48px", display: isPhone ? "none" : "flex" }}
       >
         {/* Logo row */}
-        <div className="relative flex items-center border-b border-border flex-shrink-0" style={{ height: "56px", paddingLeft: sidebarOpen ? "16px" : "0", paddingRight: sidebarOpen ? "8px" : "0" }}>
+        <div className="flex items-center border-b border-border flex-shrink-0" style={{ height: "56px", paddingLeft: sidebarOpen ? "16px" : "0", paddingRight: sidebarOpen ? "8px" : "0" }}>
           {sidebarOpen ? (
             <div className="flex items-center gap-2.5 flex-1 min-w-0">
               <div className="w-6 h-6 bg-primary flex items-center justify-center flex-shrink-0">
@@ -950,13 +950,15 @@ export default function App() {
               </div>
             </div>
           )}
-          <button
-            onClick={() => setSidebarOpen((open) => !open)}
-            className={`text-muted-foreground hover:text-foreground transition-colors flex-shrink-0 ${sidebarOpen ? "p-2" : "absolute top-3 left-3 z-10 rounded-sm bg-sidebar/90 p-1.5"}`}
-            title={sidebarOpen ? "收起側欄" : "展開側欄"}
-          >
-            {sidebarOpen ? <PanelLeftClose size={15} strokeWidth={1.75} /> : <PanelLeftOpen size={15} strokeWidth={1.75} />}
-          </button>
+          {sidebarOpen && (
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="p-2 text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
+              title="收起側欄"
+            >
+              <PanelLeftClose size={15} strokeWidth={1.75} />
+            </button>
+          )}
         </div>
 
         {/* Nav */}
@@ -975,7 +977,7 @@ export default function App() {
           {renderNavSection(OPERATIONS_ITEMS)}
         </nav>
 
-        {/* User */}
+        {/* User / expand */}
         <div className="border-t border-border flex-shrink-0">
           {sidebarOpen ? (
             <div className="px-4 py-3 flex items-center gap-2.5">
@@ -989,7 +991,13 @@ export default function App() {
               <Settings size={13} className="text-muted-foreground flex-shrink-0 cursor-pointer hover:text-foreground transition-colors" />
             </div>
           ) : (
-            <div className="py-3" />
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="w-full flex items-center justify-center py-3 text-muted-foreground hover:text-foreground transition-colors"
+              title="展開側欄"
+            >
+              <PanelLeftOpen size={15} strokeWidth={1.75} />
+            </button>
           )}
         </div>
       </aside>
