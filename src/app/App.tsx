@@ -1,5 +1,6 @@
-import { useState, useCallback, useRef, useEffect } from "react";
-import GridLayout, { Layout } from "react-grid-layout";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import type { Layout, Layouts } from "react-grid-layout";
+import { Responsive, WidthProvider } from "react-grid-layout/legacy";
 import "react-grid-layout/css/styles.css";
 import {
   LayoutDashboard,
@@ -27,6 +28,7 @@ import {
   Loader,
   Sun,
   Moon,
+  Menu,
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
@@ -85,6 +87,25 @@ const DEFAULT_LAYOUT: Layout[] = [
   { i: "p10", x: 8,  y: 21, w: 4, h: 7, minW: 2, minH: 4 },
   { i: "p11", x: 0,  y: 28, w: 6, h: 5, minW: 2, minH: 3 },
   { i: "p12", x: 6,  y: 28, w: 6, h: 5, minW: 2, minH: 3 },
+];
+
+const ResponsiveGridLayout = WidthProvider(Responsive);
+const DESKTOP_COLS = 12;
+const TABLET_COLS = 8;
+const MOBILE_COLS = 4;
+const BREAKPOINTS = { lg: 1200, md: 900, sm: 768, xs: 480, xxs: 0 } as const;
+const GRID_COLS = { lg: DESKTOP_COLS, md: TABLET_COLS, sm: MOBILE_COLS, xs: MOBILE_COLS, xxs: MOBILE_COLS } as const;
+type BreakpointKey = keyof typeof GRID_COLS;
+const MONITORING_ITEMS = [
+  { icon: LayoutDashboard, label: "Overview", key: "overview" as NavKey },
+  { icon: Globe, label: "Traffic", key: "traffic" as NavKey },
+  { icon: Server, label: "Services", key: "services" as NavKey },
+  { icon: Database, label: "Database", key: "database" as NavKey },
+];
+const OPERATIONS_ITEMS = [
+  { icon: AlertCircle, label: "Incidents", key: "alerts" as NavKey },
+  { icon: BarChart2, label: "Analytics", key: "traffic" as NavKey },
+  { icon: TrendingUp, label: "Reports", key: "database" as NavKey },
 ];
 
 const DASHBOARD_ROW_ID = "main";
@@ -183,6 +204,77 @@ function syncUidCounter(panels: PanelData[]) {
   }, uidCounter);
 }
 
+function sortLayoutItems(a: Layout, b: Layout) {
+  if (a.y !== b.y) return a.y - b.y;
+  return a.x - b.x;
+}
+
+function ensureDesktopLayout(layout: Layout[], panels: PanelData[]) {
+  const fallback = buildFallbackLayout(panels);
+  const layoutMap = new Map(layout.map((item) => [item.i, item]));
+
+  return panels.map((panel, index) => {
+    const item = layoutMap.get(panel.id) ?? fallback[index];
+    return {
+      i: panel.id,
+      x: item.x,
+      y: item.y,
+      w: item.w,
+      h: item.h,
+      minW: item.minW ?? 2,
+      minH: item.minH ?? 3,
+    };
+  });
+}
+
+function scaleLayoutToCols(layout: Layout[], targetCols: number) {
+  return layout.map((item) => {
+    const scaledW = Math.max(item.minW ?? 2, Math.min(targetCols, Math.round((item.w / DESKTOP_COLS) * targetCols) || item.w));
+    const scaledX = Math.min(
+      Math.max(0, Math.round((item.x / DESKTOP_COLS) * targetCols)),
+      Math.max(0, targetCols - scaledW),
+    );
+
+    return {
+      ...item,
+      x: scaledX,
+      w: scaledW,
+      minW: Math.min(item.minW ?? 2, scaledW),
+    };
+  });
+}
+
+function estimateMobileRows(panel: PanelData, item: Layout) {
+  if (panel.mode === "api") return Math.max(item.h, item.minH ?? 4, 8);
+
+  const lines = panel.content.split("\n");
+  const wrappedLines = lines.reduce((total, line) => total + Math.max(1, Math.ceil(line.length / 24)), 0);
+  const estimatedRows = Math.ceil((112 + wrappedLines * Math.max(18, panel.bodySize * 1.6)) / 34);
+
+  return Math.max(item.h, item.minH ?? 4, Math.min(16, estimatedRows));
+}
+
+function stackLayoutForMobile(layout: Layout[], panels: PanelData[]) {
+  let nextY = 0;
+  const panelMap = new Map(panels.map((panel) => [panel.id, panel]));
+
+  return [...layout].sort(sortLayoutItems).map((item) => {
+    const panel = panelMap.get(item.i);
+    const mobileRows = panel ? estimateMobileRows(panel, item) : Math.max(item.h, item.minH ?? 4, 6);
+    const stacked = {
+      ...item,
+      x: 0,
+      y: nextY,
+      w: MOBILE_COLS,
+      h: mobileRows,
+      minW: MOBILE_COLS,
+      minH: Math.max(item.minH ?? 4, 5),
+    };
+    nextY += stacked.h;
+    return stacked;
+  });
+}
+
 // ── Nav ────────────────────────────────────────────────────────────────────────
 
 function NavItem({ icon: Icon, label, active, onClick }: { icon: React.ElementType; label: string; active: boolean; onClick: () => void }) {
@@ -255,7 +347,17 @@ function EditableTitle({ value, onChange, fontSize }: { value: string; onChange:
 
 // ── Editable text body ─────────────────────────────────────────────────────────
 
-function EditableBody({ value, onChange, fontSize }: { value: string; onChange: (v: string) => void; fontSize: number }) {
+function EditableBody({
+  value,
+  onChange,
+  fontSize,
+  compact,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  fontSize: number;
+  compact: boolean;
+}) {
   return (
     <textarea
       value={value}
@@ -268,8 +370,9 @@ function EditableBody({ value, onChange, fontSize }: { value: string; onChange: 
         fontSize: `${fontSize}px`,
         fontWeight: 400,
         scrollbarWidth: "none",
-        whiteSpace: "pre",
-        overflowX: "auto",
+        whiteSpace: compact ? "pre-wrap" : "pre",
+        overflowX: compact ? "hidden" : "auto",
+        wordBreak: compact ? "break-word" : "normal",
       }}
     />
   );
@@ -341,16 +444,18 @@ function ApiView({
   onUrlChange,
   onFetch,
   fontSize,
+  compact,
 }: {
   panel: PanelData;
   onUrlChange: (v: string) => void;
   onFetch: () => void;
   fontSize: number;
+  compact: boolean;
 }) {
   return (
     <div className="h-full flex flex-col gap-2 min-h-0">
       {/* URL input row */}
-      <div className="flex items-center gap-2 flex-shrink-0">
+      <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center"}`}>
         <input
           value={panel.apiUrl}
           onChange={(e) => onUrlChange(e.target.value)}
@@ -385,7 +490,7 @@ function ApiView({
         ) : panel.apiResponse !== null ? (
           <pre
             className="text-accent"
-            style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: `${fontSize}px`, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0 }}
+            style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: `${fontSize}px`, whiteSpace: compact ? "pre-wrap" : "pre", wordBreak: "break-all", margin: 0, overflowX: compact ? "hidden" : "auto" }}
           >
             {panel.apiResponse}
           </pre>
@@ -417,6 +522,7 @@ function Panel({
   onApiUrlChange,
   onApiFetch,
   onRemove,
+  compact,
 }: {
   data: PanelData;
   onTitleChange: (v: string) => void;
@@ -427,6 +533,7 @@ function Panel({
   onApiUrlChange: (v: string) => void;
   onApiFetch: () => void;
   onRemove: () => void;
+  compact: boolean;
 }) {
   return (
     <div className="bg-card border border-border h-full flex flex-col overflow-hidden group/panel">
@@ -441,7 +548,7 @@ function Panel({
         <EditableTitle value={data.title} onChange={onTitleChange} fontSize={data.titleSize} />
 
         {/* Title size control — inline next to title */}
-        <div className="flex items-center gap-0.5 opacity-0 group-hover/panel:opacity-100 transition-opacity flex-shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-0.5 opacity-100 md:opacity-0 md:group-hover/panel:opacity-100 transition-opacity flex-shrink-0" onMouseDown={(e) => e.stopPropagation()}>
           <button
             onClick={() => onTitleSizeChange(Math.max(TITLE_MIN, data.titleSize - 1))}
             className="w-5 h-5 flex items-center justify-center rounded-sm bg-primary/20 text-primary hover:bg-primary/40 transition-colors font-bold"
@@ -460,7 +567,7 @@ function Panel({
         <button
           onMouseDown={(e) => e.stopPropagation()}
           onClick={onRemove}
-          className="flex-shrink-0 text-muted-foreground/0 group-hover/panel:text-muted-foreground/40 hover:!text-destructive transition-colors"
+          className="flex-shrink-0 text-muted-foreground/40 md:text-muted-foreground/0 md:group-hover/panel:text-muted-foreground/40 hover:!text-destructive transition-colors"
         >
           <X size={11} strokeWidth={2} />
         </button>
@@ -497,9 +604,9 @@ function Panel({
         {/* Content */}
         <div className="flex-1 min-h-0 p-3" onMouseDown={(e) => e.stopPropagation()}>
           {data.mode === "text" ? (
-            <EditableBody value={data.content} onChange={onContentChange} fontSize={data.bodySize} />
+            <EditableBody value={data.content} onChange={onContentChange} fontSize={data.bodySize} compact={compact} />
           ) : (
-            <ApiView panel={data} onUrlChange={onApiUrlChange} onFetch={onApiFetch} fontSize={data.bodySize} />
+            <ApiView panel={data} onUrlChange={onApiUrlChange} onFetch={onApiFetch} fontSize={data.bodySize} compact={compact} />
           )}
         </div>
       </div>
@@ -510,7 +617,6 @@ function Panel({
 // ── App ────────────────────────────────────────────────────────────────────────
 
 type NavKey = "overview" | "traffic" | "services" | "database" | "alerts";
-const COL = 12;
 const ROW_HEIGHT = 38;
 const MARGIN: [number, number] = [8, 8];
 let uidCounter = 100;
@@ -520,7 +626,10 @@ export default function App() {
   const [panels, setPanels] = useState<PanelData[]>(DEFAULT_PANELS);
   const [layout, setLayout] = useState<Layout[]>(DEFAULT_LAYOUT);
   const [containerWidth, setContainerWidth] = useState(0);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [currentBreakpoint, setCurrentBreakpoint] = useState<BreakpointKey>("lg");
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [isHydrating, setIsHydrating] = useState(Boolean(supabase));
   const [syncState, setSyncState] = useState<SyncState>(() => (supabase ? "idle" : "offline"));
   const [syncMessage, setSyncMessage] = useState(() => (supabase ? "Preparing cloud sync" : "Supabase not configured"));
@@ -533,6 +642,29 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
+
+  useEffect(() => {
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  const isPhone = viewportWidth < BREAKPOINTS.sm;
+  const isTabletOrBelow = viewportWidth < BREAKPOINTS.lg;
+  const isCompactLayout = currentBreakpoint !== "lg";
+  const responsiveLayouts = useMemo<Layouts>(() => {
+    const desktopLayout = ensureDesktopLayout(layout, panels);
+    const tabletLayout = scaleLayoutToCols(desktopLayout, TABLET_COLS);
+    const mobileLayout = stackLayoutForMobile(desktopLayout, panels);
+
+    return {
+      lg: desktopLayout,
+      md: tabletLayout,
+      sm: mobileLayout,
+      xs: mobileLayout,
+      xxs: mobileLayout,
+    };
+  }, [layout, panels]);
 
   const containerElRef = useRef<HTMLDivElement | null>(null);
   const saveTimeoutRef = useRef<number | null>(null);
@@ -561,6 +693,10 @@ export default function App() {
       if (saveTimeoutRef.current !== null) window.clearTimeout(saveTimeoutRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!isPhone) setMobileSidebarOpen(false);
+  }, [isPhone]);
 
   useEffect(() => {
     let ignore = false;
@@ -718,6 +854,30 @@ export default function App() {
     setLayout(DEFAULT_LAYOUT);
   }
 
+  function renderNavSection(items: ReadonlyArray<{ icon: React.ElementType; label: string; key: NavKey }>, mobile = false) {
+    return items.map(({ icon: Icon, label, key }) => {
+      const handleClick = () => {
+        setActiveNav(key);
+        if (mobile) setMobileSidebarOpen(false);
+      };
+
+      return mobile ? (
+        <NavItem key={label} icon={Icon} label={label} active={activeNav === key} onClick={handleClick} />
+      ) : sidebarOpen ? (
+        <NavItem key={label} icon={Icon} label={label} active={activeNav === key} onClick={handleClick} />
+      ) : (
+        <button
+          key={label}
+          onClick={handleClick}
+          title={label}
+          className={`w-full flex items-center justify-center py-2.5 transition-colors ${activeNav === key ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}
+        >
+          <Icon size={16} strokeWidth={activeNav === key ? 2 : 1.5} />
+        </button>
+      );
+    });
+  }
+
   const syncLabel = isHydrating
     ? "LOADING"
     : syncState === "saving"
@@ -742,13 +902,38 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background" style={{ fontFamily: "'Barlow', sans-serif" }}>
+      {isPhone && mobileSidebarOpen && (
+        <div className="fixed inset-0 z-50 flex">
+          <button className="absolute inset-0 bg-black/60" onClick={() => setMobileSidebarOpen(false)} aria-label="Close menu" />
+          <aside className="relative z-10 flex h-full w-64 flex-col border-r border-border bg-sidebar">
+            <div className="flex items-center gap-2.5 border-b border-border px-4" style={{ height: "56px" }}>
+              <div className="w-6 h-6 bg-primary flex items-center justify-center flex-shrink-0">
+                <Activity size={13} strokeWidth={2.5} className="text-primary-foreground" />
+              </div>
+              <span className="text-foreground flex-1 truncate" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "15px", fontWeight: 700, letterSpacing: "0.05em" }}>
+                AXIOM OPS
+              </span>
+              <button onClick={() => setMobileSidebarOpen(false)} className="p-2 text-muted-foreground hover:text-foreground transition-colors">
+                <X size={16} strokeWidth={1.75} />
+              </button>
+            </div>
+            <nav className="flex-1 py-3 flex flex-col gap-0.5 overflow-y-auto" style={{ scrollbarWidth: "none" }}>
+              <p className="text-muted-foreground px-3 mb-1" style={{ fontSize: "10px", letterSpacing: "0.12em", fontWeight: 600, fontFamily: "'Barlow Condensed', sans-serif" }}>MONITORING</p>
+              {renderNavSection(MONITORING_ITEMS, true)}
+              <p className="text-muted-foreground px-3 mt-3 mb-1" style={{ fontSize: "10px", letterSpacing: "0.12em", fontWeight: 600, fontFamily: "'Barlow Condensed', sans-serif" }}>OPERATIONS</p>
+              {renderNavSection(OPERATIONS_ITEMS, true)}
+            </nav>
+          </aside>
+        </div>
+      )}
+
       {/* Sidebar */}
       <aside
         className="flex-shrink-0 flex flex-col border-r border-border bg-sidebar h-full overflow-hidden transition-all duration-200"
-        style={{ width: sidebarOpen ? "224px" : "48px" }}
+        style={{ width: sidebarOpen ? "224px" : "48px", display: isPhone ? "none" : "flex" }}
       >
         {/* Logo row */}
-        <div className="flex items-center border-b border-border flex-shrink-0" style={{ height: "56px", paddingLeft: sidebarOpen ? "16px" : "0" }}>
+        <div className="relative flex items-center border-b border-border flex-shrink-0" style={{ height: "56px", paddingLeft: sidebarOpen ? "16px" : "0", paddingRight: sidebarOpen ? "8px" : "0" }}>
           {sidebarOpen ? (
             <div className="flex items-center gap-2.5 flex-1 min-w-0">
               <div className="w-6 h-6 bg-primary flex items-center justify-center flex-shrink-0">
@@ -765,14 +950,13 @@ export default function App() {
               </div>
             </div>
           )}
-          {sidebarOpen && (
-            <button
-              onClick={() => setSidebarOpen(false)}
-              className="p-2 text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
-            >
-              <PanelLeftClose size={15} strokeWidth={1.75} />
-            </button>
-          )}
+          <button
+            onClick={() => setSidebarOpen((open) => !open)}
+            className={`text-muted-foreground hover:text-foreground transition-colors flex-shrink-0 ${sidebarOpen ? "p-2" : "absolute top-3 left-3 z-10 rounded-sm bg-sidebar/90 p-1.5"}`}
+            title={sidebarOpen ? "收起側欄" : "展開側欄"}
+          >
+            {sidebarOpen ? <PanelLeftClose size={15} strokeWidth={1.75} /> : <PanelLeftOpen size={15} strokeWidth={1.75} />}
+          </button>
         </div>
 
         {/* Nav */}
@@ -780,25 +964,7 @@ export default function App() {
           {sidebarOpen && (
             <p className="text-muted-foreground px-3 mb-1" style={{ fontSize: "10px", letterSpacing: "0.12em", fontWeight: 600, fontFamily: "'Barlow Condensed', sans-serif" }}>MONITORING</p>
           )}
-          {[
-            { icon: LayoutDashboard, label: "Overview", key: "overview" as NavKey },
-            { icon: Globe,           label: "Traffic",  key: "traffic"  as NavKey },
-            { icon: Server,          label: "Services", key: "services" as NavKey },
-            { icon: Database,        label: "Database", key: "database" as NavKey },
-          ].map(({ icon: Icon, label, key }) => (
-            sidebarOpen ? (
-              <NavItem key={key} icon={Icon} label={label} active={activeNav === key} onClick={() => setActiveNav(key)} />
-            ) : (
-              <button
-                key={key}
-                onClick={() => setActiveNav(key)}
-                title={label}
-                className={`w-full flex items-center justify-center py-2.5 transition-colors ${activeNav === key ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}
-              >
-                <Icon size={16} strokeWidth={activeNav === key ? 2 : 1.5} />
-              </button>
-            )
-          ))}
+          {renderNavSection(MONITORING_ITEMS)}
 
           {sidebarOpen ? (
             <p className="text-muted-foreground px-3 mt-3 mb-1" style={{ fontSize: "10px", letterSpacing: "0.12em", fontWeight: 600, fontFamily: "'Barlow Condensed', sans-serif" }}>OPERATIONS</p>
@@ -806,26 +972,10 @@ export default function App() {
             <div className="mx-3 my-2 h-px bg-border" />
           )}
 
-          {[
-            { icon: AlertCircle, label: "Incidents", key: "alerts"   as NavKey },
-            { icon: BarChart2,   label: "Analytics", key: "traffic"  as NavKey },
-            { icon: TrendingUp,  label: "Reports",   key: "database" as NavKey },
-          ].map(({ icon: Icon, label, key }) => (
-            sidebarOpen ? (
-              <NavItem key={label} icon={Icon} label={label} active={activeNav === key && label === "Incidents"} onClick={() => label === "Incidents" && setActiveNav("alerts")} />
-            ) : (
-              <button
-                key={label}
-                title={label}
-                className="w-full flex items-center justify-center py-2.5 text-muted-foreground hover:text-foreground transition-colors"
-              >
-                <Icon size={16} strokeWidth={1.5} />
-              </button>
-            )
-          ))}
+          {renderNavSection(OPERATIONS_ITEMS)}
         </nav>
 
-        {/* User / expand */}
+        {/* User */}
         <div className="border-t border-border flex-shrink-0">
           {sidebarOpen ? (
             <div className="px-4 py-3 flex items-center gap-2.5">
@@ -839,13 +989,7 @@ export default function App() {
               <Settings size={13} className="text-muted-foreground flex-shrink-0 cursor-pointer hover:text-foreground transition-colors" />
             </div>
           ) : (
-            <button
-              onClick={() => setSidebarOpen(true)}
-              className="w-full flex items-center justify-center py-3 text-muted-foreground hover:text-foreground transition-colors"
-              title="展開側欄"
-            >
-              <PanelLeftOpen size={15} strokeWidth={1.75} />
-            </button>
+            <div className="py-3" />
           )}
         </div>
       </aside>
@@ -853,36 +997,45 @@ export default function App() {
       {/* Main */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Topbar */}
-        <header className="flex items-center gap-3 px-6 py-3.5 border-b border-border bg-background flex-shrink-0">
-          <div className="flex-1">
-            <h1 className="text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "18px", fontWeight: 700, letterSpacing: "0.04em" }}>
+        <header className={`flex items-center gap-3 border-b border-border bg-background flex-shrink-0 ${isPhone ? "px-3 py-3" : "px-6 py-3.5"}`}>
+          {isPhone && (
+            <button
+              onClick={() => setMobileSidebarOpen(true)}
+              className="p-2 text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
+              title="Open menu"
+            >
+              <Menu size={18} strokeWidth={1.75} />
+            </button>
+          )}
+          <div className="flex-1 min-w-0">
+            <h1 className="text-foreground truncate" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: isPhone ? "15px" : "18px", fontWeight: 700, letterSpacing: "0.04em" }}>
               PNC Dashboard 
             </h1>
-            <p className="text-muted-foreground" style={{ fontSize: "11px" }}>
+            <p className="text-muted-foreground truncate" style={{ fontSize: isPhone ? "10px" : "11px" }}>
               Click any title to rename · Click any panel to edit content · Drag to reposition · {syncMessage}
             </p>
           </div>
           <button
             onClick={addPanel}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-primary/10 border border-primary/30 text-primary hover:bg-primary/20 transition-colors"
+            className={`flex items-center gap-1.5 bg-primary/10 border border-primary/30 text-primary hover:bg-primary/20 transition-colors ${isPhone ? "px-2.5 py-1.5" : "px-3 py-1.5"}`}
             style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
           >
             <Plus size={12} strokeWidth={2.5} />
-            ADD PANEL
+            {isPhone ? "ADD" : "ADD PANEL"}
           </button>
           <button
             onClick={reset}
-            className="px-3 py-1.5 border border-border text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors"
+            className={`${isPhone ? "px-2.5 py-1.5" : "px-3 py-1.5"} border border-border text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors`}
             style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 600 }}
           >
-            RESET
+            {isPhone ? "RESET" : "RESET"}
           </button>
           <div
             className={`px-3 py-1.5 border transition-colors ${syncClassName}`}
             style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
             title={syncMessage}
           >
-            {syncLabel}
+            {isPhone ? syncLabel.slice(0, 4) : syncLabel}
           </div>
           <div className="flex items-center gap-1 text-muted-foreground">
             <button
@@ -893,33 +1046,39 @@ export default function App() {
               {darkMode
                 ? <Sun size={14} strokeWidth={1.75} />
                 : <Moon size={14} strokeWidth={1.75} />}
-              <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}>
+              <span style={{ display: isPhone ? "none" : "inline", fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}>
                 {darkMode ? "LIGHT" : "DARK"}
               </span>
             </button>
-            <button className="p-1.5 hover:text-foreground transition-colors relative">
+            {!isTabletOrBelow && <button className="p-1.5 hover:text-foreground transition-colors relative">
               <Bell size={16} strokeWidth={1.5} />
               <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-destructive rounded-full" />
-            </button>
-            <button className="p-1.5 hover:text-foreground transition-colors">
+            </button>}
+            {!isTabletOrBelow && <button className="p-1.5 hover:text-foreground transition-colors">
               <Search size={16} strokeWidth={1.5} />
-            </button>
+            </button>}
           </div>
         </header>
 
         {/* Grid */}
         <div ref={containerRef} className="flex-1 overflow-y-auto overflow-x-hidden px-2" style={{ scrollbarWidth: "none" }}>
           {containerWidth > 0 && (
-            <GridLayout
+            <ResponsiveGridLayout
               key={containerWidth}
-              layout={layout}
-              cols={COL}
-              rowHeight={ROW_HEIGHT}
+              layouts={responsiveLayouts}
+              breakpoints={BREAKPOINTS}
+              cols={GRID_COLS}
+              rowHeight={isPhone ? 34 : ROW_HEIGHT}
               width={containerWidth}
-              margin={MARGIN}
+              margin={isPhone ? [6, 6] : MARGIN}
               draggableHandle=".drag-handle"
-              onLayoutChange={(l) => setLayout(l)}
-              resizeHandles={["se", "sw", "ne", "nw", "e", "w", "n", "s"]}
+              onBreakpointChange={(breakpoint) => setCurrentBreakpoint(breakpoint as BreakpointKey)}
+              onLayoutChange={(_, allLayouts) => {
+                if (allLayouts.lg?.length) setLayout(allLayouts.lg);
+              }}
+              isDraggable={!isCompactLayout}
+              isResizable={!isCompactLayout}
+              resizeHandles={isCompactLayout ? ["se"] : ["se", "sw", "ne", "nw", "e", "w", "n", "s"]}
               useCSSTransforms
             >
               {panels.map((panel) => (
@@ -934,10 +1093,11 @@ export default function App() {
                     onApiUrlChange={(v) => updateApiUrl(panel.id, v)}
                     onApiFetch={() => fetchApi(panel.id)}
                     onRemove={() => removePanel(panel.id)}
+                    compact={isCompactLayout}
                   />
                 </div>
               ))}
-            </GridLayout>
+            </ResponsiveGridLayout>
           )}
         </div>
       </div>
