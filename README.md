@@ -8,7 +8,6 @@
   Run `npm i` to install the dependencies.
 
   Run `npm run dev` to start the development server.
-
   ## GitHub Pages Deployment
 
   This repository is configured for GitHub Pages project deployment at:

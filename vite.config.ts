@@ -5,7 +5,6 @@ import react from '@vitejs/plugin-react'
 
 const GITHUB_PAGES_BASE = "/InformationDisplayDashboard/"
 
-
 function figmaAssetResolver() {
   return {
     name: 'figma-asset-resolver',

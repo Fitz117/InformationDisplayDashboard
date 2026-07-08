@@ -51,7 +51,6 @@ interface PanelData {
 
 type PersistedPanelData = Omit<PanelData, "apiResponse" | "apiError" | "apiLoading">;
 type SyncState = "idle" | "saving" | "saved" | "error" | "offline";
-
 // ── Default panels ─────────────────────────────────────────────────────────────
 
 function makePanel(id: string, title: string, content: string): PanelData {
