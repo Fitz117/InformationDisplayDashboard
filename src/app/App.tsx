@@ -93,6 +93,8 @@ const ResponsiveGridLayout = WidthProvider(Responsive);
 const DESKTOP_COLS = 12;
 const TABLET_COLS = 8;
 const MOBILE_COLS = 4;
+const PHONE_PANEL_MIN_HEIGHT = 340;
+const TABLET_PANEL_MIN_HEIGHT = 300;
 const BREAKPOINTS = { lg: 1200, md: 900, sm: 768, xs: 480, xxs: 0 } as const;
 const GRID_COLS = { lg: DESKTOP_COLS, md: TABLET_COLS, sm: MOBILE_COLS, xs: MOBILE_COLS, xxs: MOBILE_COLS } as const;
 type BreakpointKey = keyof typeof GRID_COLS;
@@ -1087,15 +1089,19 @@ export default function App() {
             <div className={`grid gap-2 py-2 ${isPhone ? "grid-cols-1" : "grid-cols-2"}`}>
               {orderedPanels.map((panel) => {
                 const item = desktopLayoutMap.get(panel.id);
-                const minHeight = isPhone
-                  ? estimateMobileRows(panel, item ?? { i: panel.id, x: 0, y: 0, w: MOBILE_COLS, h: 6, minW: 1, minH: 4 })
-                  : Math.max(item?.h ?? 6, 7);
+                const estimatedHeight = isPhone
+                  ? estimateMobileRows(panel, item ?? { i: panel.id, x: 0, y: 0, w: MOBILE_COLS, h: 6, minW: 1, minH: 4 }) * 34
+                  : Math.max(item?.h ?? 6, 7) * 38;
+                const minHeight = Math.max(
+                  estimatedHeight,
+                  isPhone ? PHONE_PANEL_MIN_HEIGHT : TABLET_PANEL_MIN_HEIGHT,
+                );
 
                 return (
                   <div
                     key={panel.id}
                     className="min-w-0"
-                    style={{ minHeight: `${minHeight * (isPhone ? 34 : 38)}px` }}
+                    style={{ minHeight: `${minHeight}px` }}
                   >
                     <Panel
                       data={panel}
