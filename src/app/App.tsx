@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type { Layout, Layouts } from "react-grid-layout";
 import { Responsive, WidthProvider } from "react-grid-layout/legacy";
 import "react-grid-layout/css/styles.css";
+import * as dashjs from "dashjs";
 import Hls from "hls.js";
 import {
   LayoutDashboard,
@@ -568,6 +569,7 @@ function LivePlayer({
     const cleanSrc = src.trim();
     const cleanPoster = poster.trim();
     let hls: Hls | null = null;
+    let dashPlayer: dashjs.MediaPlayerClass | null = null;
     setPlayerError(null);
 
     if (cleanPoster) video.poster = cleanPoster;
@@ -595,6 +597,26 @@ function LivePlayer({
       } else {
         setPlayerError("目前瀏覽器不支援 HLS 直播");
       }
+    } else if (cleanSrc.endsWith(".mpd")) {
+      try {
+        dashPlayer = dashjs.MediaPlayer().create();
+        dashPlayer.initialize(video, cleanSrc, true);
+        dashPlayer.updateSettings({
+          streaming: {
+            abr: {
+              autoSwitchBitrate: {
+                video: true,
+                audio: true,
+              },
+            },
+          },
+        });
+        dashPlayer.on(dashjs.MediaPlayer.events.ERROR, () => {
+          setPlayerError("DASH 串流初始化失敗，請確認 .mpd 來源可公開存取");
+        });
+      } catch {
+        setPlayerError("目前瀏覽器無法初始化 DASH 播放");
+      }
     } else {
       video.src = cleanSrc;
     }
@@ -604,6 +626,7 @@ function LivePlayer({
     return () => {
       video.removeEventListener("error", handleVideoError);
       if (hls) hls.destroy();
+      if (dashPlayer) dashPlayer.reset();
       video.pause();
       video.removeAttribute("src");
       video.load();
@@ -613,7 +636,7 @@ function LivePlayer({
   if (!src.trim()) {
     return (
       <p className="text-muted-foreground/40 text-center mt-4" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "12px" }}>
-        輸入直播來源，例如 `mp4` 或 `m3u8`
+        輸入直播來源，例如 `mp4`、`m3u8` 或 `mpd`
       </p>
     );
   }
@@ -652,7 +675,7 @@ function LiveView({
   return (
     <div className="h-full flex flex-col gap-2 min-h-0">
       <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center"}`}>
-        <ConfigInput value={panel.liveUrl} onChange={onLiveUrlChange} placeholder="https://example.com/live.m3u8" />
+        <ConfigInput value={panel.liveUrl} onChange={onLiveUrlChange} placeholder="https://example.com/live.m3u8 或 .mpd" />
         <ConfigInput value={panel.posterUrl} onChange={onPosterUrlChange} placeholder="Poster URL（可留空）" />
       </div>
       <div className="flex-1 min-h-0 overflow-auto border border-border bg-background/50 p-2" style={{ scrollbarWidth: "none" }}>
