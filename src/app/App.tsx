@@ -612,6 +612,10 @@ function ApiView({
     if (panel.apiResponse === null) return null;
     return parseApiFeed(panel.apiResponse);
   }, [panel.apiResponse]);
+  const apiFeedOptions = [
+    { label: "on.cc 本地新聞", value: "http://news.on.cc/ncnews/rss/loc_news.xml" },
+    { label: "政府新聞網", value: "https://www.news.gov.hk/tc/common/html/topstories.rss.xml" },
+  ] as const;
 
   return (
     <div className="h-full flex flex-col gap-2 min-h-0">
@@ -634,6 +638,22 @@ function ApiView({
             : <RefreshCw size={11} strokeWidth={2} />}
           {panel.apiLoading ? "FETCHING" : "FETCH"}
         </button>
+      </div>
+      <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "flex-wrap items-center"}`}>
+        {apiFeedOptions.map((option) => (
+          <button
+            key={option.value}
+            onClick={() => onUrlChange(option.value)}
+            className={`px-3 py-1.5 border transition-colors ${
+              panel.apiUrl.trim() === option.value
+                ? "border-primary/50 bg-primary/20 text-primary"
+                : "border-border bg-secondary text-foreground hover:bg-white/5"
+            }`}
+            style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+          >
+            {option.label}
+          </button>
+        ))}
       </div>
 
       {/* Response area */}
