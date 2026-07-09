@@ -613,7 +613,7 @@ function ApiView({
     return parseApiFeed(panel.apiResponse);
   }, [panel.apiResponse]);
   const apiFeedOptions = [
-    { label: "on.cc 本地新聞", value: "http://news.on.cc/ncnews/rss/loc_news.xml" },
+    { label: "RTHK 本地快訊", value: "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_clocal.xml" },
     { label: "政府新聞網", value: "https://www.news.gov.hk/tc/common/html/topstories.rss.xml" },
   ] as const;
 
