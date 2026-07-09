@@ -488,6 +488,111 @@ function ConfigInput({
   );
 }
 
+type ParsedFeedItem = {
+  title: string;
+  link: string;
+  pubDate: string;
+  description: string;
+};
+
+type ParsedFeed = {
+  title: string;
+  description: string;
+  items: ParsedFeedItem[];
+};
+
+function normalizeApiUrl(url: string) {
+  const trimmed = url.trim();
+  if (trimmed.startsWith("http://")) {
+    return `https://${trimmed.slice("http://".length)}`;
+  }
+
+  return trimmed;
+}
+
+function looksLikeFeedUrl(url: string) {
+  return /(\.xml($|[?#]))|(\/rss\/)|rss|atom/i.test(url);
+}
+
+function buildApiRequestCandidates(url: string) {
+  const normalizedUrl = normalizeApiUrl(url);
+  const candidates = [normalizedUrl];
+
+  if (looksLikeFeedUrl(normalizedUrl)) {
+    candidates.push(`https://api.allorigins.win/raw?url=${encodeURIComponent(normalizedUrl)}`);
+  }
+
+  return Array.from(new Set(candidates));
+}
+
+function getXmlChildText(parent: Element | null | undefined, tagNames: string[]) {
+  if (!parent) return "";
+
+  for (const tagName of tagNames) {
+    const match = Array.from(parent.children).find((child) => {
+      const normalized = child.tagName.toLowerCase();
+      const expected = tagName.toLowerCase();
+      return normalized === expected || normalized.endsWith(`:${expected}`);
+    });
+
+    const value = match?.textContent?.trim();
+    if (value) return value;
+  }
+
+  return "";
+}
+
+function getFeedItemLink(item: Element) {
+  const linkNode = Array.from(item.children).find((child) => {
+    const normalized = child.tagName.toLowerCase();
+    return normalized === "link" || normalized.endsWith(":link");
+  });
+
+  if (!linkNode) return "";
+
+  const href = linkNode.getAttribute("href")?.trim();
+  if (href) return href;
+
+  return linkNode.textContent?.trim() ?? "";
+}
+
+function parseApiFeed(text: string): ParsedFeed | null {
+  if (typeof DOMParser === "undefined") return null;
+
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("<")) return null;
+
+  const xml = new DOMParser().parseFromString(trimmed, "application/xml");
+  if (xml.querySelector("parsererror")) return null;
+
+  const rssItems = Array.from(xml.getElementsByTagName("item"));
+  const atomEntries = Array.from(xml.getElementsByTagName("entry"));
+  const sourceItems = rssItems.length ? rssItems : atomEntries;
+  if (!sourceItems.length) return null;
+
+  const channel = xml.getElementsByTagName("channel")[0];
+  const feed = xml.getElementsByTagName("feed")[0];
+  const metaRoot = channel ?? feed ?? xml.documentElement;
+
+  const items = sourceItems
+    .map((item) => ({
+      title: getXmlChildText(item, ["title"]),
+      link: getFeedItemLink(item),
+      pubDate: getXmlChildText(item, ["pubDate", "published", "updated"]),
+      description: getXmlChildText(item, ["description", "summary", "content"]),
+    }))
+    .filter((item) => item.title || item.link || item.description)
+    .slice(0, 20);
+
+  if (!items.length) return null;
+
+  return {
+    title: getXmlChildText(metaRoot, ["title"]) || "RSS Feed",
+    description: getXmlChildText(metaRoot, ["description", "subtitle"]),
+    items,
+  };
+}
+
 // ── API view ───────────────────────────────────────────────────────────────────
 
 function ApiView({
@@ -503,6 +608,11 @@ function ApiView({
   fontSize: number;
   compact: boolean;
 }) {
+  const parsedFeed = useMemo(() => {
+    if (panel.apiResponse === null) return null;
+    return parseApiFeed(panel.apiResponse);
+  }, [panel.apiResponse]);
+
   return (
     <div className="h-full flex flex-col gap-2 min-h-0">
       {/* URL input row */}
@@ -534,6 +644,60 @@ function ApiView({
             <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: `${fontSize}px`, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
               {panel.apiError}
             </span>
+          </div>
+        ) : parsedFeed ? (
+          <div className="flex flex-col gap-3">
+            <div className="border border-border bg-background/60 p-3">
+              <div
+                className="text-foreground uppercase"
+                style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: `${Math.max(fontSize + 2, 13)}px`, letterSpacing: "0.08em", fontWeight: 700 }}
+              >
+                {parsedFeed.title}
+              </div>
+              {parsedFeed.description && (
+                <p className="mt-1 text-muted-foreground/80" style={{ fontFamily: "'Barlow', sans-serif", fontSize: `${fontSize}px`, margin: 0 }}>
+                  {parsedFeed.description}
+                </p>
+              )}
+            </div>
+
+            {parsedFeed.items.map((item, index) => (
+              <article key={`${item.link || item.title}-${index}`} className="border border-border bg-background/60 p-3">
+                {item.link ? (
+                  <a
+                    href={item.link}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-primary hover:underline"
+                    style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: `${Math.max(fontSize + 1, 12)}px`, letterSpacing: "0.04em", fontWeight: 700 }}
+                  >
+                    {item.title || item.link}
+                  </a>
+                ) : (
+                  <div
+                    className="text-foreground"
+                    style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: `${Math.max(fontSize + 1, 12)}px`, letterSpacing: "0.04em", fontWeight: 700 }}
+                  >
+                    {item.title}
+                  </div>
+                )}
+
+                {item.pubDate && (
+                  <div className="mt-1 text-muted-foreground/70" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: `${Math.max(fontSize - 1, 10)}px` }}>
+                    {item.pubDate}
+                  </div>
+                )}
+
+                {item.description && (
+                  <p
+                    className="mt-2 text-foreground/85"
+                    style={{ fontFamily: "'Barlow', sans-serif", fontSize: `${fontSize}px`, marginBottom: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+                  >
+                    {item.description}
+                  </p>
+                )}
+              </article>
+            ))}
           </div>
         ) : panel.apiResponse !== null ? (
           <pre
@@ -1163,8 +1327,24 @@ export default function App() {
     if (!panel || !panel.apiUrl.trim()) return;
     setPanels((prev) => prev.map((p) => p.id === id ? { ...p, apiLoading: true, apiError: null } : p));
     try {
-      const res = await fetch(panel.apiUrl.trim());
-      const text = await res.text();
+      const candidates = buildApiRequestCandidates(panel.apiUrl);
+      let text = "";
+      let lastError: Error | null = null;
+
+      for (const candidate of candidates) {
+        try {
+          const res = await fetch(candidate);
+          if (!res.ok) throw new Error(`Request failed (${res.status})`);
+          text = await res.text();
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error("Request failed");
+        }
+      }
+
+      if (lastError) throw lastError;
+
       let formatted = text;
       try { formatted = JSON.stringify(JSON.parse(text), null, 2); } catch {}
       setPanels((prev) => prev.map((p) => p.id === id ? { ...p, apiLoading: false, apiResponse: formatted, apiError: null } : p));
