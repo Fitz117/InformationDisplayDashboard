@@ -695,11 +695,31 @@ function EmbedView({
   compact: boolean;
 }) {
   const cleanUrl = url.trim();
+  const tvbLiveOptions = [
+    { label: "TVB 無線新聞台", value: "https://news.tvb.com/tc/live/C" },
+    { label: "TVB 財經體育資訊台", value: "https://news.tvb.com/tc/live/F" },
+  ] as const;
 
   return (
     <div className="h-full flex flex-col gap-2 min-h-0">
       <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center"}`}>
         <ConfigInput value={url} onChange={onUrlChange} placeholder="https://example.com/embed" />
+      </div>
+      <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "flex-wrap items-center"}`}>
+        {tvbLiveOptions.map((option) => (
+          <button
+            key={option.value}
+            onClick={() => onUrlChange(option.value)}
+            className={`px-3 py-1.5 border transition-colors ${
+              cleanUrl === option.value
+                ? "border-primary/50 bg-primary/20 text-primary"
+                : "border-border bg-secondary text-foreground hover:bg-white/5"
+            }`}
+            style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+          >
+            {option.label}
+          </button>
+        ))}
       </div>
       <div className="flex-1 min-h-0 overflow-hidden border border-border bg-background/50 p-2">
         {cleanUrl ? (
