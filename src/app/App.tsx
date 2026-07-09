@@ -695,10 +695,55 @@ function EmbedView({
   compact: boolean;
 }) {
   const cleanUrl = url.trim();
-  const tvbLiveOptions = [
+  const liveEmbedOptions = [
     { label: "TVB 無線新聞台", value: "https://news.tvb.com/tc/live/C" },
-    { label: "TVB 財經體育資訊台", value: "https://news.tvb.com/tc/live/F" },
+    { label: "Now 331 直播台", value: "https://news.now.com/home/live331a" },
+    { label: "Now 332 新聞台", value: "https://news.now.com/home/live" },
   ] as const;
+  const isCroppedLiveEmbed = liveEmbedOptions.some((option) => option.value === cleanUrl);
+
+  if (cleanUrl && isCroppedLiveEmbed) {
+    return (
+      <div className="h-full flex flex-col gap-2 min-h-0">
+        <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center"}`}>
+          <ConfigInput value={url} onChange={onUrlChange} placeholder="https://example.com/embed" />
+        </div>
+        <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "flex-wrap items-center"}`}>
+          {liveEmbedOptions.map((option) => (
+            <button
+              key={option.value}
+              onClick={() => onUrlChange(option.value)}
+              className={`px-3 py-1.5 border transition-colors ${
+                cleanUrl === option.value
+                  ? "border-primary/50 bg-primary/20 text-primary"
+                  : "border-border bg-secondary text-foreground hover:bg-white/5"
+              }`}
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex-1 min-h-0 overflow-hidden border border-border bg-background/50 p-2">
+          <div className="h-full flex flex-col gap-2">
+            <div className="relative flex-1 overflow-hidden bg-black border border-border">
+              <iframe
+                src={cleanUrl}
+                title="Embedded content"
+                className="absolute border-0 bg-black"
+                allow="autoplay; fullscreen; picture-in-picture"
+                referrerPolicy="strict-origin-when-cross-origin"
+                style={{ top: "-10%", left: "-24%", width: "150%", height: "160%" }}
+              />
+            </div>
+            <p className="text-muted-foreground/60" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
+              已套用直播裁切視圖，會盡量只顯示直播畫面；若目標網站改版，裁切位置可能需要再調整。
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full flex flex-col gap-2 min-h-0">
@@ -706,7 +751,7 @@ function EmbedView({
         <ConfigInput value={url} onChange={onUrlChange} placeholder="https://example.com/embed" />
       </div>
       <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "flex-wrap items-center"}`}>
-        {tvbLiveOptions.map((option) => (
+        {liveEmbedOptions.map((option) => (
           <button
             key={option.value}
             onClick={() => onUrlChange(option.value)}
@@ -724,13 +769,16 @@ function EmbedView({
       <div className="flex-1 min-h-0 overflow-hidden border border-border bg-background/50 p-2">
         {cleanUrl ? (
           <div className="h-full flex flex-col gap-2">
-            <iframe
-              src={cleanUrl}
-              title="Embedded content"
-              className="w-full flex-1 border-0 bg-black"
-              allow="autoplay; fullscreen; picture-in-picture"
-              referrerPolicy="strict-origin-when-cross-origin"
-            />
+            <div className={isCroppedLiveEmbed ? "relative flex-1 overflow-hidden bg-black border border-border" : "flex-1"}>
+              <iframe
+                src={cleanUrl}
+                title="Embedded content"
+                className={isCroppedLiveEmbed ? "absolute border-0 bg-black" : "w-full h-full border-0 bg-black"}
+                allow="autoplay; fullscreen; picture-in-picture"
+                referrerPolicy="strict-origin-when-cross-origin"
+                style={isCroppedLiveEmbed ? { top: "-10%", left: "-24%", width: "150%", height: "160%" } : undefined}
+              />
+            </div>
             <p className="text-muted-foreground/60" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
               若目標網站禁止 iframe 嵌入，畫面可能無法顯示。
             </p>
