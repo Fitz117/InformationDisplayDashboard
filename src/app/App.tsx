@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type { Layout, Layouts } from "react-grid-layout";
 import { Responsive, WidthProvider } from "react-grid-layout/legacy";
 import "react-grid-layout/css/styles.css";
+import Hls from "hls.js";
 import {
   LayoutDashboard,
   TrendingUp,
@@ -36,7 +37,7 @@ import { supabase } from "../lib/supabase";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-type PanelMode = "text" | "api";
+type PanelMode = "text" | "api" | "live" | "embed";
 
 interface PanelData {
   id: string;
@@ -46,6 +47,9 @@ interface PanelData {
   bodySize: number;
   mode: PanelMode;
   apiUrl: string;
+  liveUrl: string;
+  embedUrl: string;
+  posterUrl: string;
   apiResponse: string | null;
   apiError: string | null;
   apiLoading: boolean;
@@ -56,7 +60,21 @@ type SyncState = "idle" | "saving" | "saved" | "error" | "offline";
 // ── Default panels ─────────────────────────────────────────────────────────────
 
 function makePanel(id: string, title: string, content: string): PanelData {
-  return { id, title, content, titleSize: 11, bodySize: 12, mode: "text", apiUrl: "", apiResponse: null, apiError: null, apiLoading: false };
+  return {
+    id,
+    title,
+    content,
+    titleSize: 11,
+    bodySize: 12,
+    mode: "text",
+    apiUrl: "",
+    liveUrl: "",
+    embedUrl: "",
+    posterUrl: "",
+    apiResponse: null,
+    apiError: null,
+    apiLoading: false,
+  };
 }
 
 const DEFAULT_PANELS: PanelData[] = [
@@ -133,8 +151,11 @@ function toRuntimePanel(panel: Partial<PersistedPanelData> & { id: string }): Pa
     content: typeof panel.content === "string" ? panel.content : "",
     titleSize: typeof panel.titleSize === "number" ? panel.titleSize : 11,
     bodySize: typeof panel.bodySize === "number" ? panel.bodySize : 12,
-    mode: panel.mode === "api" ? "api" : "text",
+    mode: panel.mode === "api" || panel.mode === "live" || panel.mode === "embed" ? panel.mode : "text",
     apiUrl: typeof panel.apiUrl === "string" ? panel.apiUrl : "",
+    liveUrl: typeof panel.liveUrl === "string" ? panel.liveUrl : "",
+    embedUrl: typeof panel.embedUrl === "string" ? panel.embedUrl : "",
+    posterUrl: typeof panel.posterUrl === "string" ? panel.posterUrl : "",
     apiResponse: null,
     apiError: null,
     apiLoading: false,
@@ -248,6 +269,7 @@ function scaleLayoutToCols(layout: Layout[], targetCols: number) {
 
 function estimateMobileRows(panel: PanelData, item: Layout) {
   if (panel.mode === "api") return Math.max(item.h, item.minH ?? 4, 8);
+  if (panel.mode === "live" || panel.mode === "embed") return Math.max(item.h, item.minH ?? 4, 10);
 
   const lines = panel.content.split("\n");
   const wrappedLines = lines.reduce((total, line) => total + Math.max(1, Math.ceil(line.length / 24)), 0);
@@ -384,7 +406,9 @@ function EditableBody({
 
 const MODE_OPTIONS: { value: PanelMode; label: string; icon: React.ElementType }[] = [
   { value: "text", label: "文字", icon: FileText },
-  { value: "api",  label: "API",  icon: Link },
+  { value: "api", label: "API", icon: Link },
+  { value: "live", label: "直播", icon: Activity },
+  { value: "embed", label: "嵌入", icon: Globe },
 ];
 
 function ModeSelector({
@@ -411,7 +435,7 @@ function ModeSelector({
       <button
         onClick={() => setOpen((o) => !o)}
         className="flex items-center gap-1.5 px-2 py-1 border border-border bg-secondary hover:bg-white/5 transition-colors justify-between"
-        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700, width: "100px", minWidth: "100px" }}
+        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700, width: "112px", minWidth: "112px" }}
       >
         <div className="flex items-center gap-1.5">
           <current.icon size={10} strokeWidth={2} className="text-muted-foreground" />
@@ -421,7 +445,7 @@ function ModeSelector({
       </button>
 
       {open && (
-        <div className="absolute top-full left-0 mt-0.5 z-50 border border-border bg-card shadow-xl" style={{ width: "100px" }}>
+        <div className="absolute top-full left-0 mt-0.5 z-50 border border-border bg-card shadow-xl" style={{ width: "112px" }}>
           {MODE_OPTIONS.map((opt) => (
             <button
               key={opt.value}
@@ -436,6 +460,30 @@ function ModeSelector({
         </div>
       )}
     </div>
+  );
+}
+
+function ConfigInput({
+  value,
+  onChange,
+  placeholder,
+  onEnter,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  onEnter?: () => void;
+}) {
+  return (
+    <input
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(e) => e.key === "Enter" && onEnter?.()}
+      placeholder={placeholder}
+      spellCheck={false}
+      className="flex-1 min-w-0 bg-secondary border border-border px-2 py-1.5 text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-primary/50 transition-colors"
+      style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px" }}
+    />
   );
 }
 
@@ -458,14 +506,11 @@ function ApiView({
     <div className="h-full flex flex-col gap-2 min-h-0">
       {/* URL input row */}
       <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center"}`}>
-        <input
+        <ConfigInput
           value={panel.apiUrl}
-          onChange={(e) => onUrlChange(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && onFetch()}
+          onChange={onUrlChange}
+          onEnter={onFetch}
           placeholder="https://api.example.com/endpoint"
-          spellCheck={false}
-          className="flex-1 min-w-0 bg-secondary border border-border px-2 py-1.5 text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-primary/50 transition-colors"
-          style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px" }}
         />
         <button
           onClick={onFetch}
@@ -506,6 +551,157 @@ function ApiView({
   );
 }
 
+function LivePlayer({
+  src,
+  poster,
+}: {
+  src: string;
+  poster: string;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [playerError, setPlayerError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const cleanSrc = src.trim();
+    const cleanPoster = poster.trim();
+    let hls: Hls | null = null;
+    setPlayerError(null);
+
+    if (cleanPoster) video.poster = cleanPoster;
+    else video.removeAttribute("poster");
+
+    if (!cleanSrc) {
+      video.removeAttribute("src");
+      video.load();
+      return;
+    }
+
+    const handleVideoError = () => setPlayerError("直播來源無法播放，請檢查網址或串流格式");
+    video.addEventListener("error", handleVideoError);
+
+    if (cleanSrc.endsWith(".m3u8")) {
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = cleanSrc;
+      } else if (Hls.isSupported()) {
+        hls = new Hls();
+        hls.loadSource(cleanSrc);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (data.fatal) setPlayerError("HLS 串流初始化失敗，請確認直播連結可公開存取");
+        });
+      } else {
+        setPlayerError("目前瀏覽器不支援 HLS 直播");
+      }
+    } else {
+      video.src = cleanSrc;
+    }
+
+    video.load();
+
+    return () => {
+      video.removeEventListener("error", handleVideoError);
+      if (hls) hls.destroy();
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    };
+  }, [poster, src]);
+
+  if (!src.trim()) {
+    return (
+      <p className="text-muted-foreground/40 text-center mt-4" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "12px" }}>
+        輸入直播來源，例如 `mp4` 或 `m3u8`
+      </p>
+    );
+  }
+
+  return (
+    <div className="h-full flex flex-col gap-2">
+      <video
+        ref={videoRef}
+        className="w-full flex-1 min-h-0 bg-black"
+        controls
+        autoPlay
+        playsInline
+        crossOrigin="anonymous"
+      />
+      {playerError && (
+        <div className="flex items-start gap-2 text-destructive">
+          <AlertTriangle size={12} strokeWidth={2} className="flex-shrink-0 mt-0.5" />
+          <span style={{ fontFamily: "'Barlow', sans-serif", fontSize: "12px" }}>{playerError}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LiveView({
+  panel,
+  onLiveUrlChange,
+  onPosterUrlChange,
+  compact,
+}: {
+  panel: PanelData;
+  onLiveUrlChange: (value: string) => void;
+  onPosterUrlChange: (value: string) => void;
+  compact: boolean;
+}) {
+  return (
+    <div className="h-full flex flex-col gap-2 min-h-0">
+      <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center"}`}>
+        <ConfigInput value={panel.liveUrl} onChange={onLiveUrlChange} placeholder="https://example.com/live.m3u8" />
+        <ConfigInput value={panel.posterUrl} onChange={onPosterUrlChange} placeholder="Poster URL（可留空）" />
+      </div>
+      <div className="flex-1 min-h-0 overflow-auto border border-border bg-background/50 p-2" style={{ scrollbarWidth: "none" }}>
+        <LivePlayer src={panel.liveUrl} poster={panel.posterUrl} />
+      </div>
+    </div>
+  );
+}
+
+function EmbedView({
+  url,
+  onUrlChange,
+  compact,
+}: {
+  url: string;
+  onUrlChange: (value: string) => void;
+  compact: boolean;
+}) {
+  const cleanUrl = url.trim();
+
+  return (
+    <div className="h-full flex flex-col gap-2 min-h-0">
+      <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center"}`}>
+        <ConfigInput value={url} onChange={onUrlChange} placeholder="https://example.com/embed" />
+      </div>
+      <div className="flex-1 min-h-0 overflow-hidden border border-border bg-background/50 p-2">
+        {cleanUrl ? (
+          <div className="h-full flex flex-col gap-2">
+            <iframe
+              src={cleanUrl}
+              title="Embedded content"
+              className="w-full flex-1 border-0 bg-black"
+              allow="autoplay; fullscreen; picture-in-picture"
+              referrerPolicy="strict-origin-when-cross-origin"
+            />
+            <p className="text-muted-foreground/60" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
+              若目標網站禁止 iframe 嵌入，畫面可能無法顯示。
+            </p>
+          </div>
+        ) : (
+          <p className="text-muted-foreground/40 text-center mt-4" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "12px" }}>
+            輸入可嵌入的網址或 iframe src
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Panel ──────────────────────────────────────────────────────────────────────
 
 const TITLE_MIN = 8;
@@ -522,6 +718,9 @@ function Panel({
   onBodySizeChange,
   onModeChange,
   onApiUrlChange,
+  onLiveUrlChange,
+  onEmbedUrlChange,
+  onPosterUrlChange,
   onApiFetch,
   onRemove,
   compact,
@@ -533,6 +732,9 @@ function Panel({
   onBodySizeChange: (v: number) => void;
   onModeChange: (m: PanelMode) => void;
   onApiUrlChange: (v: string) => void;
+  onLiveUrlChange: (v: string) => void;
+  onEmbedUrlChange: (v: string) => void;
+  onPosterUrlChange: (v: string) => void;
   onApiFetch: () => void;
   onRemove: () => void;
   compact: boolean;
@@ -607,8 +809,12 @@ function Panel({
         <div className="flex-1 min-h-0 p-3" onMouseDown={(e) => e.stopPropagation()}>
           {data.mode === "text" ? (
             <EditableBody value={data.content} onChange={onContentChange} fontSize={data.bodySize} compact={compact} />
-          ) : (
+          ) : data.mode === "api" ? (
             <ApiView panel={data} onUrlChange={onApiUrlChange} onFetch={onApiFetch} fontSize={data.bodySize} compact={compact} />
+          ) : data.mode === "live" ? (
+            <LiveView panel={data} onLiveUrlChange={onLiveUrlChange} onPosterUrlChange={onPosterUrlChange} compact={compact} />
+          ) : (
+            <EmbedView url={data.embedUrl} onUrlChange={onEmbedUrlChange} compact={compact} />
           )}
         </div>
       </div>
@@ -816,7 +1022,7 @@ export default function App() {
 
   function addPanel() {
     const id = `p${++uidCounter}`;
-    setPanels((prev) => [...prev, { id, title: "New Panel", content: "", titleSize: 11, bodySize: 12, mode: "text", apiUrl: "", apiResponse: null, apiError: null, apiLoading: false }]);
+    setPanels((prev) => [...prev, makePanel(id, "New Panel", "")]);
     setLayout((prev) => [...prev, { i: id, x: 0, y: Infinity, w: 4, h: 5, minW: 2, minH: 3 }]);
   }
 
@@ -847,6 +1053,18 @@ export default function App() {
 
   function updateApiUrl(id: string, apiUrl: string) {
     setPanels((prev) => prev.map((p) => p.id === id ? { ...p, apiUrl } : p));
+  }
+
+  function updateLiveUrl(id: string, liveUrl: string) {
+    setPanels((prev) => prev.map((p) => p.id === id ? { ...p, liveUrl } : p));
+  }
+
+  function updateEmbedUrl(id: string, embedUrl: string) {
+    setPanels((prev) => prev.map((p) => p.id === id ? { ...p, embedUrl } : p));
+  }
+
+  function updatePosterUrl(id: string, posterUrl: string) {
+    setPanels((prev) => prev.map((p) => p.id === id ? { ...p, posterUrl } : p));
   }
 
   async function fetchApi(id: string) {
@@ -1111,6 +1329,9 @@ export default function App() {
                       onBodySizeChange={(v) => updateBodySize(panel.id, v)}
                       onModeChange={(m) => updateMode(panel.id, m)}
                       onApiUrlChange={(v) => updateApiUrl(panel.id, v)}
+                    onLiveUrlChange={(v) => updateLiveUrl(panel.id, v)}
+                    onEmbedUrlChange={(v) => updateEmbedUrl(panel.id, v)}
+                    onPosterUrlChange={(v) => updatePosterUrl(panel.id, v)}
                       onApiFetch={() => fetchApi(panel.id)}
                       onRemove={() => removePanel(panel.id)}
                       compact
@@ -1148,6 +1369,9 @@ export default function App() {
                     onBodySizeChange={(v) => updateBodySize(panel.id, v)}
                     onModeChange={(m) => updateMode(panel.id, m)}
                     onApiUrlChange={(v) => updateApiUrl(panel.id, v)}
+                    onLiveUrlChange={(v) => updateLiveUrl(panel.id, v)}
+                    onEmbedUrlChange={(v) => updateEmbedUrl(panel.id, v)}
+                    onPosterUrlChange={(v) => updatePosterUrl(panel.id, v)}
                     onApiFetch={() => fetchApi(panel.id)}
                     onRemove={() => removePanel(panel.id)}
                     compact={false}
