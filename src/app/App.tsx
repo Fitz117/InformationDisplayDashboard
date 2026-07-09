@@ -519,6 +519,7 @@ function buildApiRequestCandidates(url: string) {
   const candidates = [normalizedUrl];
 
   if (looksLikeFeedUrl(normalizedUrl)) {
+    candidates.push(`https://corsproxy.io/?url=${encodeURIComponent(normalizedUrl)}`);
     candidates.push(`https://api.allorigins.win/raw?url=${encodeURIComponent(normalizedUrl)}`);
   }
 
