@@ -652,6 +652,7 @@ export default function App() {
   const isPhone = viewportWidth < BREAKPOINTS.sm;
   const isTabletOrBelow = viewportWidth < BREAKPOINTS.lg;
   const isCompactLayout = currentBreakpoint !== "lg";
+  const useStackedLayout = isTabletOrBelow;
   const responsiveLayouts = useMemo<Layouts>(() => {
     const desktopLayout = ensureDesktopLayout(layout, panels);
     const tabletLayout = scaleLayoutToCols(desktopLayout, TABLET_COLS);
@@ -665,6 +666,18 @@ export default function App() {
       xxs: mobileLayout,
     };
   }, [layout, panels]);
+  const orderedPanels = useMemo(() => {
+    const desktopLayout = ensureDesktopLayout(layout, panels);
+    const orderedIds = desktopLayout.slice().sort(sortLayoutItems).map((item) => item.i);
+    const panelMap = new Map(panels.map((panel) => [panel.id, panel]));
+    return orderedIds
+      .map((id) => panelMap.get(id))
+      .filter((panel): panel is PanelData => Boolean(panel));
+  }, [layout, panels]);
+  const desktopLayoutMap = useMemo(
+    () => new Map(ensureDesktopLayout(layout, panels).map((item) => [item.i, item])),
+    [layout, panels],
+  );
 
   const containerElRef = useRef<HTMLDivElement | null>(null);
   const saveTimeoutRef = useRef<number | null>(null);
@@ -1070,7 +1083,37 @@ export default function App() {
 
         {/* Grid */}
         <div ref={containerRef} className="flex-1 overflow-y-auto overflow-x-hidden px-2" style={{ scrollbarWidth: "none" }}>
-          {containerWidth > 0 && (
+          {useStackedLayout ? (
+            <div className={`grid gap-2 py-2 ${isPhone ? "grid-cols-1" : "grid-cols-2"}`}>
+              {orderedPanels.map((panel) => {
+                const item = desktopLayoutMap.get(panel.id);
+                const minHeight = isPhone
+                  ? estimateMobileRows(panel, item ?? { i: panel.id, x: 0, y: 0, w: MOBILE_COLS, h: 6, minW: 1, minH: 4 })
+                  : Math.max(item?.h ?? 6, 7);
+
+                return (
+                  <div
+                    key={panel.id}
+                    className="min-w-0"
+                    style={{ minHeight: `${minHeight * (isPhone ? 34 : 38)}px` }}
+                  >
+                    <Panel
+                      data={panel}
+                      onTitleChange={(v) => updateTitle(panel.id, v)}
+                      onContentChange={(v) => updateContent(panel.id, v)}
+                      onTitleSizeChange={(v) => updateTitleSize(panel.id, v)}
+                      onBodySizeChange={(v) => updateBodySize(panel.id, v)}
+                      onModeChange={(m) => updateMode(panel.id, m)}
+                      onApiUrlChange={(v) => updateApiUrl(panel.id, v)}
+                      onApiFetch={() => fetchApi(panel.id)}
+                      onRemove={() => removePanel(panel.id)}
+                      compact
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          ) : containerWidth > 0 && (
             <ResponsiveGridLayout
               key={containerWidth}
               layouts={responsiveLayouts}
@@ -1101,7 +1144,7 @@ export default function App() {
                     onApiUrlChange={(v) => updateApiUrl(panel.id, v)}
                     onApiFetch={() => fetchApi(panel.id)}
                     onRemove={() => removePanel(panel.id)}
-                    compact={isCompactLayout}
+                    compact={false}
                   />
                 </div>
               ))}
