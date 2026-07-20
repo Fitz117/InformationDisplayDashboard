@@ -419,7 +419,7 @@ function EditableBody({
 type TextBlock =
   | { type: "paragraph"; text: string }
   | { type: "table"; headers: string[]; rows: string[][] }
-  | { type: "image"; alt: string; src: string };
+  | { type: "image"; alt: string; src: string; widthPercent: number };
 
 function splitTableCells(line: string) {
   return line
@@ -433,6 +433,45 @@ function splitTableCells(line: string) {
 function isMarkdownTableSeparator(line: string) {
   const cells = splitTableCells(line);
   return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function clampImageWidthPercent(value: number) {
+  return Math.min(100, Math.max(10, Math.round(value)));
+}
+
+function extractImageWidthPercent(rawWidth: string | undefined) {
+  if (!rawWidth) return 100;
+  const parsed = Number.parseInt(rawWidth, 10);
+  return Number.isFinite(parsed) ? clampImageWidthPercent(parsed) : 100;
+}
+
+function buildImageSnippet(altText: string, imageUrl: string, widthPercent: number) {
+  const cleanAlt = altText.trim();
+  const cleanUrl = imageUrl.trim();
+  const normalizedWidth = clampImageWidthPercent(widthPercent);
+  return `![${cleanAlt}](${cleanUrl}){width=${normalizedWidth}%}`;
+}
+
+function askImageWidthPercent(defaultValue = 100) {
+  const answer = window.prompt("請輸入圖片寬度百分比（10 - 100）", String(clampImageWidthPercent(defaultValue)));
+  if (answer === null) return null;
+  const parsed = Number.parseInt(answer.trim(), 10);
+  if (!Number.isFinite(parsed)) return clampImageWidthPercent(defaultValue);
+  return clampImageWidthPercent(parsed);
+}
+
+function buildWordTableTemplate(rowCount: number, columnCount: number) {
+  const safeRows = Math.max(1, Math.min(12, Math.floor(rowCount)));
+  const safeColumns = Math.max(1, Math.min(8, Math.floor(columnCount)));
+  const makeRow = () => `|${Array.from({ length: safeColumns }, () => "   ").join("|")}|`;
+  const separator = `|${Array.from({ length: safeColumns }, () => " --- ").join("|")}|`;
+  const rows = [makeRow(), separator];
+
+  for (let row = 0; row < Math.max(1, safeRows - 1); row += 1) {
+    rows.push(makeRow());
+  }
+
+  return rows.join("\n");
 }
 
 function parseTextBlocks(content: string): TextBlock[] {
@@ -449,12 +488,13 @@ function parseTextBlocks(content: string): TextBlock[] {
       continue;
     }
 
-    const imageMatch = trimmed.match(/^!\[(.*?)\]\((https?:\/\/[^\s)]+)\)$/i);
+    const imageMatch = trimmed.match(/^!\[(.*?)\]\((https?:\/\/[^\s)]+)\)(?:\{width=(\d{1,3})%\})?$/i);
     if (imageMatch) {
       blocks.push({
         type: "image",
         alt: imageMatch[1].trim(),
         src: imageMatch[2].trim(),
+        widthPercent: extractImageWidthPercent(imageMatch[3]),
       });
       index += 1;
       continue;
@@ -486,7 +526,7 @@ function parseTextBlocks(content: string): TextBlock[] {
       const followingLine = lines[index + 1]?.trim() ?? "";
 
       if (!candidateTrimmed) break;
-      if (/^!\[(.*?)\]\((https?:\/\/[^\s)]+)\)$/i.test(candidateTrimmed)) break;
+      if (/^!\[(.*?)\]\((https?:\/\/[^\s)]+)\)(?:\{width=(\d{1,3})%\})?$/i.test(candidateTrimmed)) break;
       if (candidateTrimmed.includes("|") && followingLine && isMarkdownTableSeparator(followingLine)) break;
 
       paragraphLines.push(candidate);
@@ -531,7 +571,8 @@ function RichTextPreview({
                 <img
                   src={block.src}
                   alt={block.alt || "Panel image"}
-                  className="w-full h-auto object-contain bg-black/20"
+                  className="h-auto object-contain bg-black/20"
+                  style={{ width: `${block.widthPercent}%`, maxWidth: "100%" }}
                   loading="lazy"
                 />
                 {block.alt && (
@@ -544,37 +585,26 @@ function RichTextPreview({
           }
 
           if (block.type === "table") {
+            const visibleRows = [block.headers, ...block.rows];
             return (
-              <div key={`table-${index}`} className="overflow-auto border border-border bg-background/50" style={{ scrollbarWidth: "thin" }}>
-                <table className="w-full border-collapse">
-                  <thead>
-                    <tr className="bg-white/5">
-                      {block.headers.map((header, headerIndex) => (
-                        <th
-                          key={`header-${headerIndex}`}
-                          className="border border-border px-2 py-1.5 text-left text-foreground"
-                          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: `${Math.max(fontSize, 11)}px`, letterSpacing: "0.06em", fontWeight: 700 }}
-                        >
-                          {header || `欄位 ${headerIndex + 1}`}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
+              <div key={`table-${index}`} className="overflow-auto border border-border bg-background/50 p-1" style={{ scrollbarWidth: "thin" }}>
+                <table className="w-full border-collapse table-fixed bg-white/[0.03]">
                   <tbody>
-                    {block.rows.map((row, rowIndex) => (
-                      <tr key={`row-${rowIndex}`} className="odd:bg-white/[0.02]">
+                    {visibleRows.map((row, rowIndex) => (
+                      <tr key={`row-${rowIndex}`} className="bg-transparent">
                         {block.headers.map((_, cellIndex) => (
                           <td
                             key={`cell-${rowIndex}-${cellIndex}`}
-                            className="border border-border px-2 py-1.5 align-top text-foreground/90"
+                            className="border border-border px-2 py-2 align-top text-foreground/90"
                             style={{
-                              fontFamily: "'JetBrains Mono', monospace",
-                              fontSize: `${Math.max(fontSize - 1, 10)}px`,
-                              whiteSpace: compact ? "pre-wrap" : "pre-wrap",
+                              fontFamily: "'Barlow', sans-serif",
+                              fontSize: `${Math.max(fontSize, 11)}px`,
+                              whiteSpace: "pre-wrap",
                               wordBreak: "break-word",
+                              minHeight: "38px",
                             }}
                           >
-                            {row[cellIndex] ?? ""}
+                            {row[cellIndex] ?? "\u00A0"}
                           </td>
                         ))}
                       </tr>
@@ -643,10 +673,16 @@ function TextModeEditor({
   }
 
   function insertTableTemplate() {
+    const columnInput = window.prompt("請輸入表格欄數（1 - 8）", "3");
+    if (columnInput === null) return;
+
+    const rowInput = window.prompt("請輸入表格列數（1 - 12）", "4");
+    if (rowInput === null) return;
+
+    const columns = Number.parseInt(columnInput.trim(), 10);
+    const rows = Number.parseInt(rowInput.trim(), 10);
     const prefix = value && !value.endsWith("\n") ? "\n" : "";
-    insertAtCursor(
-      `${prefix}| 欄位 1 | 欄位 2 | 欄位 3 |\n| --- | --- | --- |\n| 內容 A | 內容 B | 內容 C |\n| 內容 D | 內容 E | 內容 F |\n`,
-    );
+    insertAtCursor(`${prefix}${buildWordTableTemplate(rows, columns)}\n`);
     setPreview(false);
   }
 
@@ -658,8 +694,10 @@ function TextModeEditor({
     if (!trimmedUrl) return;
 
     const altText = window.prompt("請輸入圖片說明", "Dashboard 圖片")?.trim() ?? "";
+    const widthPercent = askImageWidthPercent(100);
+    if (widthPercent === null) return;
     const prefix = value && !value.endsWith("\n") ? "\n" : "";
-    insertAtCursor(`${prefix}![${altText}](${trimmedUrl})\n`);
+    insertAtCursor(`${prefix}${buildImageSnippet(altText, trimmedUrl, widthPercent)}\n`);
     setPreview(true);
   }
 
@@ -695,8 +733,14 @@ function TextModeEditor({
       const { data } = supabase.storage.from(DASHBOARD_IMAGE_BUCKET).getPublicUrl(objectPath);
       if (!data.publicUrl) throw new Error("無法取得圖片公開網址");
 
+      const widthPercent = askImageWidthPercent(100);
+      if (widthPercent === null) {
+        setUploadMessage("圖片已上傳，但你取消了插入尺寸設定");
+        return;
+      }
+
       const prefix = value && !value.endsWith("\n") ? "\n" : "";
-      insertAtCursor(`${prefix}![${fileBaseName}](${data.publicUrl})\n`);
+      insertAtCursor(`${prefix}${buildImageSnippet(fileBaseName, data.publicUrl, widthPercent)}\n`);
       setPreview(true);
       setUploadMessage("圖片已上傳並插入");
     } catch (error) {
@@ -731,7 +775,7 @@ function TextModeEditor({
           style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
         >
           <Table2 size={11} strokeWidth={2} />
-          表格範本
+          Word 表格
         </button>
         <button
           onClick={handleSelectUpload}
@@ -767,7 +811,7 @@ function TextModeEditor({
       </div>
 
       <div className="text-muted-foreground/60 flex-shrink-0" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
-        支援 Markdown 表格與 `![圖片說明](圖片網址)` 語法，可直接上傳到 Supabase Storage
+        支援 Word 風格表格與 <code>![圖片說明](圖片網址){"{width=60%}"}</code> 語法，可直接上傳到 Supabase Storage
       </div>
 
       {uploadMessage && (
