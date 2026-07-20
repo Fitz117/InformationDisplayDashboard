@@ -26,6 +26,8 @@ import {
   ChevronDown,
   Link,
   FileText,
+  Eye,
+  Image as ImageIcon,
   AlertTriangle,
   Loader,
   Sun,
@@ -33,6 +35,7 @@ import {
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
+  Table2,
 } from "lucide-react";
 import { supabase } from "../lib/supabase";
 
@@ -131,10 +134,15 @@ const OPERATIONS_ITEMS = [
 
 const DASHBOARD_ROW_ID = "main";
 const DASHBOARD_TABLE = "dashboard_state";
+const DASHBOARD_IMAGE_BUCKET = "dashboard-images";
 const SAVE_DEBOUNCE_MS = 900;
 
 function cloneDefaultPanels() {
   return DEFAULT_PANELS.map((panel) => ({ ...panel }));
+}
+
+function sanitizeUploadFilename(fileName: string) {
+  return fileName.replace(/[^\w.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || "image";
 }
 
 function cloneDefaultLayout() {
@@ -271,6 +279,8 @@ function scaleLayoutToCols(layout: Layout[], targetCols: number) {
 function estimateMobileRows(panel: PanelData, item: Layout) {
   if (panel.mode === "api") return Math.max(item.h, item.minH ?? 4, 8);
   if (panel.mode === "live" || panel.mode === "embed") return Math.max(item.h, item.minH ?? 4, 10);
+  if (/!\[[^\]]*\]\([^)]+\)/.test(panel.content)) return Math.max(item.h, item.minH ?? 4, 14);
+  if (/(^|\n)\s*\|.+\|\s*(\n|$)/.test(panel.content)) return Math.max(item.h, item.minH ?? 4, 12);
 
   const lines = panel.content.split("\n");
   const wrappedLines = lines.reduce((total, line) => total + Math.max(1, Math.ceil(line.length / 24)), 0);
@@ -377,14 +387,17 @@ function EditableBody({
   onChange,
   fontSize,
   compact,
+  textareaRef,
 }: {
   value: string;
   onChange: (v: string) => void;
   fontSize: number;
   compact: boolean;
+  textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
 }) {
   return (
     <textarea
+      ref={textareaRef}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       spellCheck={false}
@@ -400,6 +413,388 @@ function EditableBody({
         wordBreak: compact ? "break-word" : "normal",
       }}
     />
+  );
+}
+
+type TextBlock =
+  | { type: "paragraph"; text: string }
+  | { type: "table"; headers: string[]; rows: string[][] }
+  | { type: "image"; alt: string; src: string };
+
+function splitTableCells(line: string) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function isMarkdownTableSeparator(line: string) {
+  const cells = splitTableCells(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function parseTextBlocks(content: string): TextBlock[] {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const blocks: TextBlock[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const currentLine = lines[index];
+    const trimmed = currentLine.trim();
+
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    const imageMatch = trimmed.match(/^!\[(.*?)\]\((https?:\/\/[^\s)]+)\)$/i);
+    if (imageMatch) {
+      blocks.push({
+        type: "image",
+        alt: imageMatch[1].trim(),
+        src: imageMatch[2].trim(),
+      });
+      index += 1;
+      continue;
+    }
+
+    const nextLine = lines[index + 1]?.trim() ?? "";
+    if (trimmed.includes("|") && nextLine && isMarkdownTableSeparator(nextLine)) {
+      const headers = splitTableCells(trimmed);
+      const rows: string[][] = [];
+      index += 2;
+
+      while (index < lines.length) {
+        const rowLine = lines[index].trim();
+        if (!rowLine || !rowLine.includes("|")) break;
+        rows.push(splitTableCells(rowLine));
+        index += 1;
+      }
+
+      blocks.push({ type: "table", headers, rows });
+      continue;
+    }
+
+    const paragraphLines = [currentLine];
+    index += 1;
+
+    while (index < lines.length) {
+      const candidate = lines[index];
+      const candidateTrimmed = candidate.trim();
+      const followingLine = lines[index + 1]?.trim() ?? "";
+
+      if (!candidateTrimmed) break;
+      if (/^!\[(.*?)\]\((https?:\/\/[^\s)]+)\)$/i.test(candidateTrimmed)) break;
+      if (candidateTrimmed.includes("|") && followingLine && isMarkdownTableSeparator(followingLine)) break;
+
+      paragraphLines.push(candidate);
+      index += 1;
+    }
+
+    blocks.push({
+      type: "paragraph",
+      text: paragraphLines.join("\n").trim(),
+    });
+  }
+
+  return blocks;
+}
+
+function RichTextPreview({
+  value,
+  fontSize,
+  compact,
+}: {
+  value: string;
+  fontSize: number;
+  compact: boolean;
+}) {
+  const blocks = useMemo(() => parseTextBlocks(value), [value]);
+
+  if (!blocks.length) {
+    return (
+      <p className="text-muted-foreground/40 text-center mt-4" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "12px" }}>
+        尚未輸入內容
+      </p>
+    );
+  }
+
+  return (
+    <div className="h-full overflow-auto pr-1" style={{ scrollbarWidth: "none" }}>
+      <div className="flex flex-col gap-3">
+        {blocks.map((block, index) => {
+          if (block.type === "image") {
+            return (
+              <figure key={`image-${index}`} className="border border-border bg-background/50 p-2">
+                <img
+                  src={block.src}
+                  alt={block.alt || "Panel image"}
+                  className="w-full h-auto object-contain bg-black/20"
+                  loading="lazy"
+                />
+                {block.alt && (
+                  <figcaption className="mt-2 text-muted-foreground/80" style={{ fontFamily: "'Barlow', sans-serif", fontSize: `${Math.max(fontSize - 1, 11)}px` }}>
+                    {block.alt}
+                  </figcaption>
+                )}
+              </figure>
+            );
+          }
+
+          if (block.type === "table") {
+            return (
+              <div key={`table-${index}`} className="overflow-auto border border-border bg-background/50" style={{ scrollbarWidth: "thin" }}>
+                <table className="w-full border-collapse">
+                  <thead>
+                    <tr className="bg-white/5">
+                      {block.headers.map((header, headerIndex) => (
+                        <th
+                          key={`header-${headerIndex}`}
+                          className="border border-border px-2 py-1.5 text-left text-foreground"
+                          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: `${Math.max(fontSize, 11)}px`, letterSpacing: "0.06em", fontWeight: 700 }}
+                        >
+                          {header || `欄位 ${headerIndex + 1}`}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {block.rows.map((row, rowIndex) => (
+                      <tr key={`row-${rowIndex}`} className="odd:bg-white/[0.02]">
+                        {block.headers.map((_, cellIndex) => (
+                          <td
+                            key={`cell-${rowIndex}-${cellIndex}`}
+                            className="border border-border px-2 py-1.5 align-top text-foreground/90"
+                            style={{
+                              fontFamily: "'JetBrains Mono', monospace",
+                              fontSize: `${Math.max(fontSize - 1, 10)}px`,
+                              whiteSpace: compact ? "pre-wrap" : "pre-wrap",
+                              wordBreak: "break-word",
+                            }}
+                          >
+                            {row[cellIndex] ?? ""}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          }
+
+          return (
+            <div
+              key={`paragraph-${index}`}
+              className="text-foreground"
+              style={{
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: `${fontSize}px`,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                lineHeight: 1.7,
+              }}
+            >
+              {block.text}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TextModeEditor({
+  value,
+  onChange,
+  fontSize,
+  compact,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  fontSize: number;
+  compact: boolean;
+}) {
+  const [preview, setPreview] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function insertAtCursor(snippet: string) {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      onChange(`${value}${value.endsWith("\n") || !value ? "" : "\n"}${snippet}`);
+      return;
+    }
+
+    const start = textarea.selectionStart ?? value.length;
+    const end = textarea.selectionEnd ?? value.length;
+    const nextValue = `${value.slice(0, start)}${snippet}${value.slice(end)}`;
+    onChange(nextValue);
+
+    requestAnimationFrame(() => {
+      textarea.focus();
+      const caret = start + snippet.length;
+      textarea.setSelectionRange(caret, caret);
+    });
+  }
+
+  function insertTableTemplate() {
+    const prefix = value && !value.endsWith("\n") ? "\n" : "";
+    insertAtCursor(
+      `${prefix}| 欄位 1 | 欄位 2 | 欄位 3 |\n| --- | --- | --- |\n| 內容 A | 內容 B | 內容 C |\n| 內容 D | 內容 E | 內容 F |\n`,
+    );
+    setPreview(false);
+  }
+
+  function insertImageTemplate() {
+    const imageUrl = window.prompt("請輸入圖片網址", "https://");
+    if (!imageUrl) return;
+
+    const trimmedUrl = imageUrl.trim();
+    if (!trimmedUrl) return;
+
+    const altText = window.prompt("請輸入圖片說明", "Dashboard 圖片")?.trim() ?? "";
+    const prefix = value && !value.endsWith("\n") ? "\n" : "";
+    insertAtCursor(`${prefix}![${altText}](${trimmedUrl})\n`);
+    setPreview(true);
+  }
+
+  async function uploadImageFile(file: File) {
+    if (!supabase) {
+      setUploadMessage("Supabase 未連接，暫時無法上傳圖片");
+      return;
+    }
+
+    if (!file.type.startsWith("image/")) {
+      setUploadMessage("只支援上傳圖片檔案");
+      return;
+    }
+
+    setUploadingImage(true);
+    setUploadMessage(null);
+
+    try {
+      const extension = file.name.includes(".") ? file.name.split(".").pop()?.toLowerCase() ?? "png" : "png";
+      const fileBaseName = sanitizeUploadFilename(file.name.replace(/\.[^.]+$/, ""));
+      const objectPath = `panel-images/${Date.now()}-${crypto.randomUUID()}.${extension || "png"}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(DASHBOARD_IMAGE_BUCKET)
+        .upload(objectPath, file, {
+          cacheControl: "3600",
+          contentType: file.type,
+          upsert: false,
+        });
+
+      if (uploadError) throw uploadError;
+
+      const { data } = supabase.storage.from(DASHBOARD_IMAGE_BUCKET).getPublicUrl(objectPath);
+      if (!data.publicUrl) throw new Error("無法取得圖片公開網址");
+
+      const prefix = value && !value.endsWith("\n") ? "\n" : "";
+      insertAtCursor(`${prefix}![${fileBaseName}](${data.publicUrl})\n`);
+      setPreview(true);
+      setUploadMessage("圖片已上傳並插入");
+    } catch (error) {
+      setUploadMessage(error instanceof Error ? error.message : "圖片上傳失敗");
+    } finally {
+      setUploadingImage(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  function handleSelectUpload() {
+    setUploadMessage(null);
+    fileInputRef.current?.click();
+  }
+
+  return (
+    <div className="h-full flex flex-col gap-2 min-h-0">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void uploadImageFile(file);
+        }}
+      />
+      <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
+        <button
+          onClick={insertTableTemplate}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          <Table2 size={11} strokeWidth={2} />
+          表格範本
+        </button>
+        <button
+          onClick={handleSelectUpload}
+          disabled={uploadingImage}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-primary/40 bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          {uploadingImage
+            ? <Loader size={11} strokeWidth={2} className="animate-spin" />
+            : <ImageIcon size={11} strokeWidth={2} />}
+          {uploadingImage ? "上傳中" : "上傳圖片"}
+        </button>
+        <button
+          onClick={insertImageTemplate}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          <ImageIcon size={11} strokeWidth={2} />
+          插入圖片網址
+        </button>
+        <button
+          onClick={() => setPreview((current) => !current)}
+          className={`flex items-center justify-center gap-1.5 px-3 py-1.5 border transition-colors ${
+            preview
+              ? "border-primary/50 bg-primary/20 text-primary"
+              : "border-border bg-secondary text-foreground hover:bg-white/5"
+          }`}
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          <Eye size={11} strokeWidth={2} />
+          {preview ? "預覽中" : "預覽"}
+        </button>
+      </div>
+
+      <div className="text-muted-foreground/60 flex-shrink-0" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
+        支援 Markdown 表格與 `![圖片說明](圖片網址)` 語法，可直接上傳到 Supabase Storage
+      </div>
+
+      {uploadMessage && (
+        <div
+          className={`${uploadMessage.includes("失敗") || uploadMessage.includes("無法") || uploadMessage.includes("只支援") || uploadMessage.includes("未連接")
+            ? "text-destructive"
+            : "text-primary"} flex-shrink-0`}
+          style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}
+        >
+          {uploadMessage}
+        </div>
+      )}
+
+      <div className="flex-1 min-h-0">
+        {preview ? (
+          <RichTextPreview value={value} fontSize={fontSize} compact={compact} />
+        ) : (
+          <EditableBody
+            value={value}
+            onChange={onChange}
+            fontSize={fontSize}
+            compact={compact}
+            textareaRef={textareaRef}
+          />
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1084,7 +1479,7 @@ function Panel({
         {/* Content */}
         <div className="flex-1 min-h-0 p-3" onMouseDown={(e) => e.stopPropagation()}>
           {data.mode === "text" ? (
-            <EditableBody value={data.content} onChange={onContentChange} fontSize={data.bodySize} compact={compact} />
+            <TextModeEditor value={data.content} onChange={onContentChange} fontSize={data.bodySize} compact={compact} />
           ) : data.mode === "api" ? (
             <ApiView panel={data} onUrlChange={onApiUrlChange} onFetch={onApiFetch} fontSize={data.bodySize} compact={compact} />
           ) : data.mode === "live" ? (
