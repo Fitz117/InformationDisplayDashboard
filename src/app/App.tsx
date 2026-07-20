@@ -673,6 +673,100 @@ function RichTextPreview({
   );
 }
 
+type EditorBlock =
+  | { type: "paragraph"; text: string }
+  | { type: "table"; markdown: string }
+  | { type: "image"; alt: string; src: string; widthPercent: number };
+
+function parseEditorBlocks(content: string): EditorBlock[] {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const blocks: EditorBlock[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const currentLine = lines[index];
+    const trimmed = currentLine.trim();
+
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    const imageMatch = trimmed.match(IMAGE_BLOCK_PATTERN);
+    if (imageMatch) {
+      blocks.push({
+        type: "image",
+        alt: imageMatch[1].trim(),
+        src: imageMatch[2].trim(),
+        widthPercent: extractImageWidthPercent(imageMatch[3]),
+      });
+      index += 1;
+      continue;
+    }
+
+    const nextLine = lines[index + 1]?.trim() ?? "";
+    if (trimmed.includes("|") && nextLine && isMarkdownTableSeparator(nextLine)) {
+      const tableLines = [currentLine, lines[index + 1]];
+      index += 2;
+
+      while (index < lines.length) {
+        const rowLine = lines[index];
+        const rowTrimmed = rowLine.trim();
+        if (!rowTrimmed || !rowTrimmed.includes("|")) break;
+        tableLines.push(rowLine);
+        index += 1;
+      }
+
+      blocks.push({
+        type: "table",
+        markdown: tableLines.join("\n"),
+      });
+      continue;
+    }
+
+    const paragraphLines = [currentLine];
+    index += 1;
+
+    while (index < lines.length) {
+      const candidate = lines[index];
+      const candidateTrimmed = candidate.trim();
+      const followingLine = lines[index + 1]?.trim() ?? "";
+
+      if (!candidateTrimmed) break;
+      if (IMAGE_BLOCK_PATTERN.test(candidateTrimmed)) break;
+      if (candidateTrimmed.includes("|") && followingLine && isMarkdownTableSeparator(followingLine)) break;
+
+      paragraphLines.push(candidate);
+      index += 1;
+    }
+
+    blocks.push({
+      type: "paragraph",
+      text: paragraphLines.join("\n"),
+    });
+  }
+
+  return blocks.length ? blocks : [{ type: "paragraph", text: "" }];
+}
+
+function serializeEditorBlocks(blocks: EditorBlock[]) {
+  const normalizedBlocks = blocks.length ? blocks : [{ type: "paragraph", text: "" } satisfies EditorBlock];
+
+  return normalizedBlocks
+    .map((block) => {
+      if (block.type === "image") {
+        return buildImageSnippet(block.alt, block.src, block.widthPercent);
+      }
+
+      if (block.type === "table") {
+        return block.markdown.trim();
+      }
+
+      return block.text;
+    })
+    .join("\n\n");
+}
+
 function TextModeEditor({
   value,
   onChange,
@@ -684,28 +778,54 @@ function TextModeEditor({
   fontSize: number;
   compact: boolean;
 }) {
+  const blocks = useMemo(() => parseEditorBlocks(value), [value]);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [draggingImageIndex, setDraggingImageIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  function insertAtCursor(snippet: string) {
-    const textarea = textareaRef.current;
-    if (!textarea) {
-      onChange(`${value}${value.endsWith("\n") || !value ? "" : "\n"}${snippet}`);
-      return;
-    }
+  const commitBlocks = useCallback((nextBlocks: EditorBlock[]) => {
+    onChange(serializeEditorBlocks(nextBlocks));
+  }, [onChange]);
 
-    const start = textarea.selectionStart ?? value.length;
-    const end = textarea.selectionEnd ?? value.length;
-    const nextValue = `${value.slice(0, start)}${snippet}${value.slice(end)}`;
-    onChange(nextValue);
+  function updateBlock(index: number, nextBlock: EditorBlock) {
+    const nextBlocks = [...blocks];
+    nextBlocks[index] = nextBlock;
+    commitBlocks(nextBlocks);
+  }
 
-    requestAnimationFrame(() => {
-      textarea.focus();
-      const caret = start + snippet.length;
-      textarea.setSelectionRange(caret, caret);
-    });
+  function insertBlockAt(index: number, block: EditorBlock) {
+    const nextBlocks = [...blocks];
+    nextBlocks.splice(index, 0, block);
+    commitBlocks(nextBlocks);
+    setActiveIndex(index);
+  }
+
+  function insertBlockAfterActive(block: EditorBlock) {
+    const insertionIndex = Math.min(Math.max(activeIndex, 0) + 1, blocks.length);
+    insertBlockAt(insertionIndex, block);
+  }
+
+  function removeBlock(index: number) {
+    const nextBlocks = blocks.filter((_, blockIndex) => blockIndex !== index);
+    commitBlocks(nextBlocks.length ? nextBlocks : [{ type: "paragraph", text: "" }]);
+    setActiveIndex(Math.max(0, Math.min(index - 1, nextBlocks.length - 1)));
+  }
+
+  function moveBlock(fromIndex: number, toIndex: number) {
+    if (fromIndex === toIndex || fromIndex + 1 === toIndex) return;
+    const nextBlocks = [...blocks];
+    const [movingBlock] = nextBlocks.splice(fromIndex, 1);
+    const adjustedIndex = toIndex > fromIndex ? toIndex - 1 : toIndex;
+    nextBlocks.splice(adjustedIndex, 0, movingBlock);
+    commitBlocks(nextBlocks);
+    setActiveIndex(adjustedIndex);
+  }
+
+  function insertTextBlock() {
+    insertBlockAfterActive({ type: "paragraph", text: "" });
   }
 
   function insertTableTemplate() {
@@ -717,38 +837,36 @@ function TextModeEditor({
 
     const columns = Number.parseInt(columnInput.trim(), 10);
     const rows = Number.parseInt(rowInput.trim(), 10);
-    const prefix = value && !value.endsWith("\n") ? "\n" : "";
-    insertAtCursor(`${prefix}${buildWordTableTemplate(rows, columns)}\n`);
+    insertBlockAfterActive({
+      type: "table",
+      markdown: buildWordTableTemplate(rows, columns),
+    });
+  }
+
+  function insertImageBlock(src: string, alt: string, widthPercent: number) {
+    const trimmedUrl = src.trim();
+    if (!trimmedUrl) {
+      setUploadMessage("圖片網址不能為空白");
+      return;
+    }
+
+    insertBlockAfterActive({
+      type: "image",
+      alt: alt.trim(),
+      src: trimmedUrl,
+      widthPercent: clampImageWidthPercent(widthPercent),
+    });
   }
 
   function insertImageTemplate() {
     const imageUrl = window.prompt("請輸入圖片網址", "https://");
     if (!imageUrl) return;
 
-    const trimmedUrl = imageUrl.trim();
-    if (!trimmedUrl) return;
-
     const altText = window.prompt("請輸入圖片說明", "Dashboard 圖片")?.trim() ?? "";
     const widthPercent = askImageWidthPercent(100);
     if (widthPercent === null) return;
-    const prefix = value && !value.endsWith("\n") ? "\n" : "";
-    insertAtCursor(`${prefix}${buildImageSnippet(altText, trimmedUrl, widthPercent)}\n`);
+    insertImageBlock(imageUrl, altText, widthPercent);
   }
-
-  const updateImageWidth = useCallback((lineIndex: number, widthPercent: number) => {
-    const lines = value.replace(/\r\n/g, "\n").split("\n");
-    const originalLine = lines[lineIndex];
-    if (originalLine === undefined) return;
-
-    const trimmedLine = originalLine.trim();
-    const imageMatch = trimmedLine.match(IMAGE_BLOCK_PATTERN);
-    if (!imageMatch) return;
-
-    const leadingWhitespace = originalLine.match(/^\s*/)?.[0] ?? "";
-    const trailingWhitespace = originalLine.match(/\s*$/)?.[0] ?? "";
-    lines[lineIndex] = `${leadingWhitespace}${buildImageSnippet(imageMatch[1], imageMatch[2], widthPercent)}${trailingWhitespace}`;
-    onChange(lines.join("\n"));
-  }, [onChange, value]);
 
   async function uploadImageFile(file: File) {
     if (!supabase) {
@@ -788,8 +906,7 @@ function TextModeEditor({
         return;
       }
 
-      const prefix = value && !value.endsWith("\n") ? "\n" : "";
-      insertAtCursor(`${prefix}${buildImageSnippet(fileBaseName, data.publicUrl, widthPercent)}\n`);
+      insertImageBlock(data.publicUrl, fileBaseName, widthPercent);
       setUploadMessage("圖片已上傳並插入");
     } catch (error) {
       setUploadMessage(error instanceof Error ? error.message : "圖片上傳失敗");
@@ -802,6 +919,45 @@ function TextModeEditor({
   function handleSelectUpload() {
     setUploadMessage(null);
     fileInputRef.current?.click();
+  }
+
+  function renderInsertionBar(index: number) {
+    const isDropTarget = dropIndex === index;
+    return (
+      <div
+        key={`insert-${index}`}
+        onDragOver={(event) => {
+          if (draggingImageIndex === null) return;
+          event.preventDefault();
+          setDropIndex(index);
+        }}
+        onDragLeave={() => {
+          if (dropIndex === index) setDropIndex(null);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          if (draggingImageIndex !== null) {
+            moveBlock(draggingImageIndex, index);
+          }
+          setDraggingImageIndex(null);
+          setDropIndex(null);
+        }}
+        className={`rounded border border-dashed px-2 py-1.5 transition-colors ${
+          isDropTarget
+            ? "border-primary bg-primary/10"
+            : "border-border/60 bg-background/20 hover:border-primary/40"
+        }`}
+      >
+        <button
+          onClick={() => insertBlockAt(index, { type: "paragraph", text: "" })}
+          className="flex w-full items-center justify-center gap-1.5 text-muted-foreground hover:text-foreground transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          <Plus size={10} strokeWidth={2.5} />
+          {draggingImageIndex !== null ? "拖曳圖片到這裡，或加入文字" : "在這裡加入文字"}
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -817,6 +973,14 @@ function TextModeEditor({
         }}
       />
       <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
+        <button
+          onClick={insertTextBlock}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          <Plus size={11} strokeWidth={2.5} />
+          加入文字
+        </button>
         <button
           onClick={insertTableTemplate}
           className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
@@ -847,7 +1011,7 @@ function TextModeEditor({
       </div>
 
       <div className="text-muted-foreground/60 flex-shrink-0" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
-        可直接輸入文字、插入帶文字的 Word 風格表格，並用 <code>![圖片說明](圖片網址){"{width=60%}"}</code> 顯示與調整圖片大小
+        同一個視窗內可直接編輯文字、插入表格與圖片，圖片可拖曳調整位置，也可隨時改大小
       </div>
 
       {uploadMessage && (
@@ -861,27 +1025,189 @@ function TextModeEditor({
         </div>
       )}
 
-      <div className={`flex-1 min-h-0 ${compact ? "flex flex-col gap-3" : "flex gap-3"}`}>
-        <div className="min-h-0 flex-1 border border-border bg-background/30 p-2">
-          <div className="mb-2 text-muted-foreground/70" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}>
-            文字內容
-          </div>
-          <div className="h-[calc(100%-24px)] min-h-[180px]">
-            <EditableBody
-              value={value}
-              onChange={onChange}
-              fontSize={fontSize}
-              compact={compact}
-              textareaRef={textareaRef}
-            />
-          </div>
+      <div className="flex-1 min-h-0 border border-border bg-background/30 p-2 overflow-auto" style={{ scrollbarWidth: "thin" }}>
+        <div className="mb-2 text-muted-foreground/70" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}>
+          單一編輯畫布
         </div>
-        <div className="min-h-0 flex-1 border border-border bg-background/30 p-2">
-          <div className="mb-2 text-muted-foreground/70" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}>
-            即時顯示
-          </div>
-          <div className="h-[calc(100%-24px)] min-h-[180px]">
-            <RichTextPreview value={value} fontSize={fontSize} compact={compact} onImageWidthChange={updateImageWidth} />
+        <div className="flex flex-col gap-2">
+          {renderInsertionBar(0)}
+          {blocks.map((block, index) => (
+            <div key={`editor-block-${index}`} className="flex flex-col gap-2">
+              {block.type === "paragraph" && (
+                <div className="border border-border bg-background/50 p-2">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }} className="text-muted-foreground/70">
+                      文字
+                    </span>
+                    {blocks.length > 1 && (
+                      <button
+                        onClick={() => removeBlock(index)}
+                        className="text-muted-foreground hover:text-destructive transition-colors"
+                      >
+                        <X size={12} strokeWidth={2} />
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    value={block.text}
+                    onFocus={() => setActiveIndex(index)}
+                    onChange={(event) => updateBlock(index, { ...block, text: event.target.value })}
+                    placeholder="請在這裡輸入文字"
+                    className="w-full resize-none bg-transparent text-foreground placeholder:text-muted-foreground/30 outline-none leading-relaxed"
+                    rows={Math.max(4, block.text.split("\n").length + 1)}
+                    style={{
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: `${fontSize}px`,
+                      whiteSpace: "pre-wrap",
+                      overflowX: compact ? "hidden" : "auto",
+                      wordBreak: compact ? "break-word" : "normal",
+                    }}
+                  />
+                </div>
+              )}
+
+              {block.type === "table" && (
+                <div className="border border-border bg-background/50 p-2">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }} className="text-muted-foreground/70">
+                      表格
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setActiveIndex(index)}
+                        className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                      >
+                        之後插入
+                      </button>
+                      {blocks.length > 1 && (
+                        <button
+                          onClick={() => removeBlock(index)}
+                          className="text-muted-foreground hover:text-destructive transition-colors"
+                        >
+                          <X size={12} strokeWidth={2} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <textarea
+                    value={block.markdown}
+                    onFocus={() => setActiveIndex(index)}
+                    onChange={(event) => updateBlock(index, { ...block, markdown: event.target.value })}
+                    className="w-full resize-none bg-transparent text-foreground outline-none leading-relaxed"
+                    rows={Math.max(5, block.markdown.split("\n").length + 1)}
+                    style={{
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: `${Math.max(fontSize - 1, 11)}px`,
+                      whiteSpace: "pre",
+                      overflowX: "auto",
+                    }}
+                  />
+                </div>
+              )}
+
+              {block.type === "image" && (
+                <figure
+                  draggable
+                  onDragStart={() => {
+                    setDraggingImageIndex(index);
+                    setActiveIndex(index);
+                  }}
+                  onDragEnd={() => {
+                    setDraggingImageIndex(null);
+                    setDropIndex(null);
+                  }}
+                  className={`border border-border bg-background/50 p-2 ${draggingImageIndex === index ? "opacity-60" : ""}`}
+                >
+                  <div className={`mb-2 flex gap-2 ${compact ? "flex-col" : "items-center justify-between"}`}>
+                    <div className="flex items-center gap-2 text-muted-foreground/70">
+                      <GripVertical size={12} strokeWidth={2.2} />
+                      <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
+                        拖曳圖片可移動位置
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => moveBlock(index, index)}
+                        className="hidden"
+                      />
+                      <button
+                        onClick={() => setActiveIndex(index)}
+                        className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                      >
+                        之後插入
+                      </button>
+                      {blocks.length > 1 && (
+                        <button
+                          onClick={() => removeBlock(index)}
+                          className="text-muted-foreground hover:text-destructive transition-colors"
+                        >
+                          <X size={12} strokeWidth={2} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <img
+                    src={block.src}
+                    alt={block.alt || "Panel image"}
+                    className="h-auto object-contain bg-black/20"
+                    style={{ width: `${block.widthPercent}%`, maxWidth: "100%" }}
+                    loading="lazy"
+                  />
+                  <div className="mt-3 flex flex-col gap-2">
+                    <input
+                      value={block.alt}
+                      onFocus={() => setActiveIndex(index)}
+                      onChange={(event) => updateBlock(index, { ...block, alt: event.target.value })}
+                      placeholder="圖片說明"
+                      className="w-full bg-transparent border border-border px-2 py-1 text-foreground outline-none"
+                      style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}
+                    />
+                    <div className={`flex gap-2 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
+                      <button
+                        onClick={() => updateBlock(index, { ...block, widthPercent: clampImageWidthPercent(block.widthPercent - 10) })}
+                        className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                      >
+                        縮小 10%
+                      </button>
+                      <input
+                        type="range"
+                        min={10}
+                        max={100}
+                        step={5}
+                        value={block.widthPercent}
+                        onChange={(event) => updateBlock(index, { ...block, widthPercent: Number(event.target.value) })}
+                        className="flex-1 min-w-[120px]"
+                      />
+                      <button
+                        onClick={() => updateBlock(index, { ...block, widthPercent: clampImageWidthPercent(block.widthPercent + 10) })}
+                        className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                      >
+                        放大 10%
+                      </button>
+                      <span
+                        className="text-primary"
+                        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+                      >
+                        {block.widthPercent}%
+                      </span>
+                    </div>
+                  </div>
+                </figure>
+              )}
+              {renderInsertionBar(index + 1)}
+            </div>
+          ))}
+          {!blocks.length && (
+            <div className="border border-border bg-background/50 p-3 text-center text-muted-foreground/60" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "12px" }}>
+              尚未輸入內容
+            </div>
+          )}
+          <div className="text-muted-foreground/50" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
+            提示：先點選想接續的位置，再按上方工具列插入文字、表格或圖片；拖曳圖片上方把手可改變位置。
           </div>
         </div>
       </div>
