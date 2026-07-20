@@ -744,6 +744,13 @@ interface SnapGuides {
   y: number | null;
 }
 
+interface SelectionBox {
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+}
+
 interface TableSelection {
   itemId: string;
   rowIndex: number;
@@ -1015,17 +1022,25 @@ function TextModeEditor({
   onChange,
   fontSize,
   compact,
+  panelId,
+  availableTextPanels,
+  onCopyLayoutToPanel,
 }: {
   value: string;
   onChange: (v: string) => void;
   fontSize: number;
   compact: boolean;
+  panelId: string;
+  availableTextPanels: Array<{ id: string; title: string }>;
+  onCopyLayoutToPanel: (targetPanelId: string, content: string) => void;
 }) {
   const doc = useMemo(() => parseFloatingCanvasDocument(value), [value]);
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
   const [interaction, setInteraction] = useState<CanvasInteraction | null>(null);
   const [snapGuides, setSnapGuides] = useState<SnapGuides>({ x: null, y: null });
   const [tableSelection, setTableSelection] = useState<TableSelection | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1151,6 +1166,126 @@ function TextModeEditor({
     updateItem(itemId, (currentItem) => currentItem.type === "image"
       ? { ...currentItem, lockAspectRatio: !currentItem.lockAspectRatio }
       : currentItem);
+  }
+
+  function selectAllItems() {
+    setSelectedItemIds(doc.items.map((item) => item.id));
+  }
+
+  function alignSelectedItems(mode: "left" | "center" | "right" | "top" | "middle" | "bottom") {
+    if (selectedItems.length < 2) return;
+    const selectedSet = new Set(selectedItemIds);
+    const left = Math.min(...selectedItems.map((item) => item.x));
+    const right = Math.max(...selectedItems.map((item) => item.x + item.width));
+    const top = Math.min(...selectedItems.map((item) => item.y));
+    const bottom = Math.max(...selectedItems.map((item) => item.y + item.height));
+    const center = (left + right) / 2;
+    const middle = (top + bottom) / 2;
+
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: currentDoc.items.map((item) => {
+        if (!selectedSet.has(item.id) || item.locked) return item;
+
+        if (mode === "left") return { ...item, x: left };
+        if (mode === "center") return { ...item, x: Math.round(center - item.width / 2) };
+        if (mode === "right") return { ...item, x: Math.round(right - item.width) };
+        if (mode === "top") return { ...item, y: top };
+        if (mode === "middle") return { ...item, y: Math.round(middle - item.height / 2) };
+        return { ...item, y: Math.round(bottom - item.height) };
+      }),
+    }));
+  }
+
+  function distributeSelectedItems(axis: "horizontal" | "vertical") {
+    if (selectedItems.length < 3) return;
+    const sortable = [...selectedItems].sort((a, b) => axis === "horizontal" ? a.x - b.x : a.y - b.y);
+
+    if (axis === "horizontal") {
+      const start = sortable[0].x;
+      const end = sortable[sortable.length - 1].x + sortable[sortable.length - 1].width;
+      const totalWidth = sortable.reduce((sum, item) => sum + item.width, 0);
+      const gap = (end - start - totalWidth) / (sortable.length - 1);
+      let cursor = start;
+      const positions = new Map<string, number>();
+      for (const item of sortable) {
+        positions.set(item.id, Math.round(cursor));
+        cursor += item.width + gap;
+      }
+
+      updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+        ...currentDoc,
+        items: currentDoc.items.map((item) => positions.has(item.id) && !item.locked ? { ...item, x: positions.get(item.id)! } : item),
+      }));
+      return;
+    }
+
+    const start = sortable[0].y;
+    const end = sortable[sortable.length - 1].y + sortable[sortable.length - 1].height;
+    const totalHeight = sortable.reduce((sum, item) => sum + item.height, 0);
+    const gap = (end - start - totalHeight) / (sortable.length - 1);
+    let cursor = start;
+    const positions = new Map<string, number>();
+    for (const item of sortable) {
+      positions.set(item.id, Math.round(cursor));
+      cursor += item.height + gap;
+    }
+
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: currentDoc.items.map((item) => positions.has(item.id) && !item.locked ? { ...item, y: positions.get(item.id)! } : item),
+    }));
+  }
+
+  async function exportCanvasLayout() {
+    const payload = JSON.stringify(sanitizeFloatingCanvasDocument(doc), null, 2);
+    try {
+      await navigator.clipboard.writeText(payload);
+      setUploadMessage("畫布配置 JSON 已複製到剪貼簿");
+    } catch {
+      window.prompt("請複製以下畫布配置 JSON", payload);
+      setUploadMessage("已開啟畫布配置 JSON 複製視窗");
+    }
+  }
+
+  function importCanvasLayout() {
+    const input = window.prompt("請貼上畫布配置 JSON 或已匯出的文字內容");
+    if (!input?.trim()) return;
+
+    try {
+      const trimmed = input.trim();
+      if (trimmed.startsWith(FLOATING_CANVAS_PREFIX)) {
+        onChange(trimmed);
+      } else {
+        const parsed = sanitizeFloatingCanvasDocument(JSON.parse(trimmed) as Partial<FloatingCanvasDocument>);
+        onChange(serializeFloatingCanvasDocument(parsed));
+      }
+      setSelectedItemIds([]);
+      setUploadMessage("畫布配置已匯入");
+    } catch {
+      setUploadMessage("匯入失敗，請確認貼上的內容是有效 JSON 或匯出字串");
+    }
+  }
+
+  function copyCanvasToAnotherPanel() {
+    const targets = availableTextPanels.filter((panel) => panel.id !== panelId);
+    if (!targets.length) {
+      setUploadMessage("沒有其他可用的 panel 可接收版面");
+      return;
+    }
+
+    const promptText = targets.map((panel) => `${panel.id}: ${panel.title}`).join("\n");
+    const targetId = window.prompt(`請輸入要接收版面的 panel ID：\n${promptText}`, targets[0]?.id ?? "");
+    if (!targetId?.trim()) return;
+
+    const target = targets.find((panel) => panel.id === targetId.trim());
+    if (!target) {
+      setUploadMessage("找不到指定的 panel ID");
+      return;
+    }
+
+    onCopyLayoutToPanel(target.id, serializeFloatingCanvasDocument(doc));
+    setUploadMessage(`已複製版面到 ${target.title}`);
   }
 
   function cloneItem(item: FloatingItem, offsetMultiplier: number) {
@@ -1651,6 +1786,12 @@ function TextModeEditor({
         return;
       }
 
+      if (modifier && event.key.toLowerCase() === "a" && !isTypingTarget) {
+        event.preventDefault();
+        selectAllItems();
+        return;
+      }
+
       if (isTypingTarget || !selectedItemIds.length) return;
 
       if (event.key === "Delete" || event.key === "Backspace") {
@@ -1751,6 +1892,34 @@ function TextModeEditor({
         >
           Duplicate
         </button>
+        <button
+          onClick={() => setSelectionMode((current) => !current)}
+          className={`flex items-center justify-center gap-1.5 px-3 py-1.5 border transition-colors ${selectionMode ? "border-primary bg-primary/20 text-primary" : "border-border bg-secondary text-foreground hover:bg-white/5"}`}
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          框選模式
+        </button>
+        <button
+          onClick={copyCanvasToAnotherPanel}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          複製到其他 Panel
+        </button>
+        <button
+          onClick={exportCanvasLayout}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          匯出配置
+        </button>
+        <button
+          onClick={importCanvasLayout}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          匯入配置
+        </button>
       </div>
 
       <div className="text-muted-foreground/60 flex-shrink-0" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
@@ -1826,6 +1995,66 @@ function TextModeEditor({
             >
               建立繞排文字方塊
             </button>
+            {selectedItems.length > 1 && (
+              <>
+                <button
+                  onClick={() => alignSelectedItems("left")}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  左對齊
+                </button>
+                <button
+                  onClick={() => alignSelectedItems("center")}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  水平置中
+                </button>
+                <button
+                  onClick={() => alignSelectedItems("right")}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  右對齊
+                </button>
+                <button
+                  onClick={() => alignSelectedItems("top")}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  上對齊
+                </button>
+                <button
+                  onClick={() => alignSelectedItems("middle")}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  垂直置中
+                </button>
+                <button
+                  onClick={() => alignSelectedItems("bottom")}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  下對齊
+                </button>
+                <button
+                  onClick={() => distributeSelectedItems("horizontal")}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  水平等距
+                </button>
+                <button
+                  onClick={() => distributeSelectedItems("vertical")}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  垂直等距
+                </button>
+              </>
+            )}
             {selectedItem.type === "image" && (
               <button
                 onClick={() => toggleImageAspectLock(selectedItem.id)}
@@ -1910,8 +2139,47 @@ function TextModeEditor({
               whiteSpace: "pre-wrap",
               overflow: "hidden",
               wordBreak: compact ? "break-word" : "normal",
+              pointerEvents: selectionMode ? "none" : "auto",
             }}
           />
+          {selectionMode && (
+            <div
+              className="absolute inset-0 z-20 cursor-crosshair bg-transparent"
+              onMouseDown={(event) => {
+                event.stopPropagation();
+                const bounds = canvasRef.current?.getBoundingClientRect();
+                if (!bounds) return;
+                const startX = event.clientX - bounds.left;
+                const startY = event.clientY - bounds.top;
+                setSelectionBox({ startX, startY, currentX: startX, currentY: startY });
+              }}
+              onMouseMove={(event) => {
+                if (!selectionBox) return;
+                const bounds = canvasRef.current?.getBoundingClientRect();
+                if (!bounds) return;
+                setSelectionBox((current) => current ? {
+                  ...current,
+                  currentX: event.clientX - bounds.left,
+                  currentY: event.clientY - bounds.top,
+                } : current);
+              }}
+              onMouseUp={() => {
+                if (!selectionBox) return;
+                const left = Math.min(selectionBox.startX, selectionBox.currentX);
+                const right = Math.max(selectionBox.startX, selectionBox.currentX);
+                const top = Math.min(selectionBox.startY, selectionBox.currentY);
+                const bottom = Math.max(selectionBox.startY, selectionBox.currentY);
+
+                const nextSelection = doc.items
+                  .filter((item) => item.x < right && item.x + item.width > left && item.y < bottom && item.y + item.height > top)
+                  .map((item) => item.id);
+
+                setSelectedItemIds(nextSelection);
+                setSelectionBox(null);
+                setSelectionMode(false);
+              }}
+            />
+          )}
 
           {snapGuides.x !== null && (
             <div
@@ -1923,6 +2191,17 @@ function TextModeEditor({
             <div
               className="absolute left-0 right-0 h-px bg-primary/70 pointer-events-none"
               style={{ top: `${snapGuides.y}px` }}
+            />
+          )}
+          {selectionBox && (
+            <div
+              className="absolute border border-primary bg-primary/10 pointer-events-none"
+              style={{
+                left: `${Math.min(selectionBox.startX, selectionBox.currentX)}px`,
+                top: `${Math.min(selectionBox.startY, selectionBox.currentY)}px`,
+                width: `${Math.abs(selectionBox.currentX - selectionBox.startX)}px`,
+                height: `${Math.abs(selectionBox.currentY - selectionBox.startY)}px`,
+              }}
             />
           )}
 
@@ -2116,7 +2395,7 @@ function TextModeEditor({
           ))}
         </div>
         <div className="border-t border-border px-3 py-2 text-muted-foreground/50" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
-          提示：可用 Shift 多選物件並群組拖曳；`Ctrl/Cmd + C` 複製、`Ctrl/Cmd + V` 貼上、`Ctrl/Cmd + D` duplicate；方向鍵微調位置，Shift + 方向鍵快速移動；選取表格儲存格後可在指定位置插入欄列。
+          提示：可用 Shift 或框選模式多選物件並群組拖曳；`Ctrl/Cmd + A` 全選、`Ctrl/Cmd + C` 複製、`Ctrl/Cmd + V` 貼上、`Ctrl/Cmd + D` duplicate；方向鍵微調位置，Shift + 方向鍵快速移動；可對齊、等距分佈、複製到其他 Panel，也可匯出／匯入配置。
         </div>
       </div>
     </div>
@@ -2720,6 +2999,8 @@ function Panel({
   onApiFetch,
   onRemove,
   compact,
+  availableTextPanels,
+  onCopyLayoutToPanel,
 }: {
   data: PanelData;
   onTitleChange: (v: string) => void;
@@ -2734,6 +3015,8 @@ function Panel({
   onApiFetch: () => void;
   onRemove: () => void;
   compact: boolean;
+  availableTextPanels: Array<{ id: string; title: string }>;
+  onCopyLayoutToPanel: (targetPanelId: string, content: string) => void;
 }) {
   return (
     <div className="bg-card border border-border h-full flex flex-col overflow-hidden group/panel">
@@ -2804,7 +3087,15 @@ function Panel({
         {/* Content */}
         <div className="flex-1 min-h-0 p-3" onMouseDown={(e) => e.stopPropagation()}>
           {data.mode === "text" ? (
-            <TextModeEditor value={data.content} onChange={onContentChange} fontSize={data.bodySize} compact={compact} />
+            <TextModeEditor
+              value={data.content}
+              onChange={onContentChange}
+              fontSize={data.bodySize}
+              compact={compact}
+              panelId={data.id}
+              availableTextPanels={availableTextPanels}
+              onCopyLayoutToPanel={onCopyLayoutToPanel}
+            />
           ) : data.mode === "api" ? (
             <ApiView panel={data} onUrlChange={onApiUrlChange} onFetch={onApiFetch} fontSize={data.bodySize} compact={compact} />
           ) : data.mode === "live" ? (
@@ -3061,6 +3352,12 @@ export default function App() {
 
   function updatePosterUrl(id: string, posterUrl: string) {
     setPanels((prev) => prev.map((p) => p.id === id ? { ...p, posterUrl } : p));
+  }
+
+  function copyLayoutToPanel(targetPanelId: string, content: string) {
+    setPanels((prev) => prev.map((panel) => panel.id === targetPanelId
+      ? { ...panel, mode: "text", content }
+      : panel));
   }
 
   async function fetchApi(id: string) {
@@ -3347,6 +3644,8 @@ export default function App() {
                       onApiFetch={() => fetchApi(panel.id)}
                       onRemove={() => removePanel(panel.id)}
                       compact
+                      availableTextPanels={orderedPanels.map(({ id, title }) => ({ id, title }))}
+                      onCopyLayoutToPanel={copyLayoutToPanel}
                     />
                   </div>
                 );
@@ -3387,6 +3686,8 @@ export default function App() {
                     onApiFetch={() => fetchApi(panel.id)}
                     onRemove={() => removePanel(panel.id)}
                     compact={false}
+                    availableTextPanels={panels.map(({ id, title }) => ({ id, title }))}
+                    onCopyLayoutToPanel={copyLayoutToPanel}
                   />
                 </div>
               ))}
