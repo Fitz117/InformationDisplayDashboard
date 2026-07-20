@@ -2055,7 +2055,7 @@ function TextModeEditor({
             >
               建立繞排文字方塊
             </button>
-            {(selectedItem.type === "text" || selectedItem.type === "table") && (
+            {selectedItem.type === "text" && (
               <div className="flex items-center gap-1 border border-border bg-secondary px-1 py-0.5">
                 <span className="text-muted-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
                   文字大小
@@ -2412,6 +2412,34 @@ function TextModeEditor({
                 </div>
               ) : (
                 <div className="h-[calc(100%-29px)] overflow-auto p-2" style={{ scrollbarWidth: "thin" }}>
+                  <div className={`mb-2 flex gap-2 ${compact ? "flex-col" : "items-center justify-between"}`}>
+                    <span className="text-muted-foreground/70" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
+                      表格文字大小
+                    </span>
+                    <div className="flex items-center gap-1 border border-border bg-secondary px-1 py-0.5">
+                      <button
+                        onClick={() => updateItem(item.id, (currentItem) => currentItem.type === "table"
+                          ? { ...currentItem, fontSize: Math.max(MIN_EDITOR_FONT_SIZE, currentItem.fontSize - 1) }
+                          : currentItem)}
+                        className="w-5 h-5 flex items-center justify-center text-accent hover:text-foreground transition-colors"
+                        style={{ fontSize: "14px", lineHeight: 1 }}
+                      >
+                        -
+                      </button>
+                      <span className="w-7 text-center text-accent" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", fontWeight: 600 }}>
+                        {item.fontSize}
+                      </span>
+                      <button
+                        onClick={() => updateItem(item.id, (currentItem) => currentItem.type === "table"
+                          ? { ...currentItem, fontSize: Math.min(MAX_EDITOR_FONT_SIZE, currentItem.fontSize + 1) }
+                          : currentItem)}
+                        className="w-5 h-5 flex items-center justify-center text-accent hover:text-foreground transition-colors"
+                        style={{ fontSize: "14px", lineHeight: 1 }}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
                   <table className="border-collapse" style={{ tableLayout: "fixed", minWidth: "100%" }}>
                     <colgroup>
                       {item.columnWidths.map((width, columnIndex) => (
