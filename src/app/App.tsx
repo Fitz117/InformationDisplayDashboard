@@ -688,6 +688,8 @@ const MIN_FLOATING_ITEM_WIDTH = 180;
 const MIN_FLOATING_ITEM_HEIGHT = 120;
 const CANVAS_SAFE_PADDING = 24;
 const SNAP_DISTANCE = 12;
+const MIN_EDITOR_FONT_SIZE = 10;
+const MAX_EDITOR_FONT_SIZE = 36;
 
 type FloatingImageItem = {
   id: string;
@@ -713,6 +715,7 @@ type FloatingTableItem = {
   height: number;
   rotation: number;
   locked: boolean;
+  fontSize: number;
   headers: string[];
   rows: string[][];
   columnWidths: number[];
@@ -727,6 +730,7 @@ type FloatingTextItem = {
   height: number;
   rotation: number;
   locked: boolean;
+  fontSize: number;
   text: string;
 };
 
@@ -735,6 +739,7 @@ type FloatingItem = FloatingImageItem | FloatingTableItem | FloatingTextItem;
 interface FloatingCanvasDocument {
   version: 2;
   text: string;
+  textFontSize: number;
   items: FloatingItem[];
   canvasHeight: number;
 }
@@ -796,6 +801,7 @@ function createFloatingTextItem(x = 48, y = 120): FloatingTextItem {
     height: 180,
     rotation: 0,
     locked: false,
+    fontSize: 16,
     text: "請輸入文字方塊內容",
   };
 }
@@ -832,6 +838,7 @@ function createFloatingTableItem(rowCount: number, columnCount: number, x = 48, 
     height: Math.max(DEFAULT_FLOATING_ITEM_HEIGHT, 120 + safeRows * 42),
     rotation: 0,
     locked: false,
+    fontSize: 13,
     headers,
     rows,
     columnWidths: Array.from({ length: safeColumns }, () => DEFAULT_TABLE_COLUMN_WIDTH),
@@ -871,6 +878,7 @@ function sanitizeFloatingItem(item: FloatingItem, index: number): FloatingItem {
       height: safeHeight,
       rotation: Number.isFinite(item.rotation) ? item.rotation : 0,
       locked: Boolean(item.locked),
+      fontSize: Number.isFinite(item.fontSize) ? Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, Math.round(item.fontSize))) : 16,
       text: typeof item.text === "string" ? item.text : "",
     };
   }
@@ -890,6 +898,7 @@ function sanitizeFloatingItem(item: FloatingItem, index: number): FloatingItem {
     height: safeHeight,
     rotation: Number.isFinite(item.rotation) ? item.rotation : 0,
     locked: Boolean(item.locked),
+    fontSize: Number.isFinite(item.fontSize) ? Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, Math.round(item.fontSize))) : 13,
     headers,
     rows,
     columnWidths,
@@ -906,6 +915,9 @@ function sanitizeFloatingCanvasDocument(doc: Partial<FloatingCanvasDocument>): F
   return {
     version: 2,
     text: safeText,
+    textFontSize: typeof doc.textFontSize === "number"
+      ? Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, Math.round(doc.textFontSize)))
+      : 14,
     items,
     canvasHeight: computeCanvasHeight(safeText, items, typeof doc.canvasHeight === "number" ? doc.canvasHeight : undefined),
   };
@@ -998,6 +1010,7 @@ function convertLegacyContentToFloatingCanvas(content: string): FloatingCanvasDo
   return sanitizeFloatingCanvasDocument({
     version: 2,
     text: textLines.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
+    textFontSize: 14,
     items,
     canvasHeight: computeCanvasHeight(textLines.join("\n"), items),
   });
@@ -1166,6 +1179,31 @@ function TextModeEditor({
     updateItem(itemId, (currentItem) => currentItem.type === "image"
       ? { ...currentItem, lockAspectRatio: !currentItem.lockAspectRatio }
       : currentItem);
+  }
+
+  function updateCanvasTextFontSize(nextFontSize: number) {
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      textFontSize: Math.max(MIN_EDITOR_FONT_SIZE, Math.min(MAX_EDITOR_FONT_SIZE, nextFontSize)),
+    }));
+  }
+
+  function updateSelectedTextLikeFontSize(delta: number) {
+    if (!selectedItems.length) return;
+    const selectedSet = new Set(selectedItemIds);
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: currentDoc.items.map((item) => {
+        if (!selectedSet.has(item.id) || item.locked) return item;
+        if (item.type === "text" || item.type === "table") {
+          return {
+            ...item,
+            fontSize: Math.max(MIN_EDITOR_FONT_SIZE, Math.min(MAX_EDITOR_FONT_SIZE, item.fontSize + delta)),
+          };
+        }
+        return item;
+      }),
+    }));
   }
 
   function selectAllItems() {
@@ -1920,6 +1958,28 @@ function TextModeEditor({
         >
           匯入配置
         </button>
+        <div className="flex items-center gap-1 border border-border bg-secondary px-1 py-0.5">
+          <span className="text-muted-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
+            背景文字
+          </span>
+          <button
+            onClick={() => updateCanvasTextFontSize(doc.textFontSize - 1)}
+            className="w-5 h-5 flex items-center justify-center text-accent hover:text-foreground transition-colors"
+            style={{ fontSize: "14px", lineHeight: 1 }}
+          >
+            -
+          </button>
+          <span className="w-7 text-center text-accent" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", fontWeight: 600 }}>
+            {doc.textFontSize}
+          </span>
+          <button
+            onClick={() => updateCanvasTextFontSize(doc.textFontSize + 1)}
+            className="w-5 h-5 flex items-center justify-center text-accent hover:text-foreground transition-colors"
+            style={{ fontSize: "14px", lineHeight: 1 }}
+          >
+            +
+          </button>
+        </div>
       </div>
 
       <div className="text-muted-foreground/60 flex-shrink-0" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
@@ -1995,6 +2055,30 @@ function TextModeEditor({
             >
               建立繞排文字方塊
             </button>
+            {(selectedItem.type === "text" || selectedItem.type === "table") && (
+              <div className="flex items-center gap-1 border border-border bg-secondary px-1 py-0.5">
+                <span className="text-muted-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
+                  文字大小
+                </span>
+                <button
+                  onClick={() => updateSelectedTextLikeFontSize(-1)}
+                  className="w-5 h-5 flex items-center justify-center text-accent hover:text-foreground transition-colors"
+                  style={{ fontSize: "14px", lineHeight: 1 }}
+                >
+                  -
+                </button>
+                <span className="w-7 text-center text-accent" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", fontWeight: 600 }}>
+                  {selectedItem.fontSize}
+                </span>
+                <button
+                  onClick={() => updateSelectedTextLikeFontSize(1)}
+                  className="w-5 h-5 flex items-center justify-center text-accent hover:text-foreground transition-colors"
+                  style={{ fontSize: "14px", lineHeight: 1 }}
+                >
+                  +
+                </button>
+              </div>
+            )}
             {selectedItems.length > 1 && (
               <>
                 <button
@@ -2133,7 +2217,7 @@ function TextModeEditor({
             className="absolute inset-0 w-full h-full resize-none bg-transparent text-foreground placeholder:text-muted-foreground/30 outline-none"
             style={{
               fontFamily: "'JetBrains Mono', monospace",
-              fontSize: `${fontSize}px`,
+              fontSize: `${doc.textFontSize}px`,
               lineHeight: 1.7,
               padding: "18px",
               whiteSpace: "pre-wrap",
@@ -2319,7 +2403,7 @@ function TextModeEditor({
                     className="w-full h-full resize-none bg-transparent text-foreground placeholder:text-muted-foreground/30 outline-none"
                     style={{
                       fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: `${fontSize}px`,
+                      fontSize: `${item.fontSize}px`,
                       lineHeight: 1.7,
                       whiteSpace: "pre-wrap",
                       wordBreak: "break-word",
@@ -2349,7 +2433,7 @@ function TextModeEditor({
                                 return { ...currentItem, headers: nextHeaders };
                               })}
                               className="w-full bg-transparent px-2 py-2 text-foreground outline-none"
-                              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: `${Math.max(fontSize - 1, 11)}px`, fontWeight: 700 }}
+                              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: `${Math.max(item.fontSize, 11)}px`, fontWeight: 700 }}
                             />
                             <div
                               className="absolute right-0 top-0 h-full w-2 cursor-col-resize"
@@ -2376,7 +2460,7 @@ function TextModeEditor({
                                 })}
                                 className="w-full resize-none bg-transparent px-2 py-2 text-foreground outline-none"
                                 rows={Math.max(2, cell.split("\n").length)}
-                                style={{ fontFamily: "'Barlow', sans-serif", fontSize: `${Math.max(fontSize - 1, 11)}px`, whiteSpace: "pre-wrap" }}
+                                style={{ fontFamily: "'Barlow', sans-serif", fontSize: `${Math.max(item.fontSize, 11)}px`, whiteSpace: "pre-wrap" }}
                               />
                             </td>
                           ))}
