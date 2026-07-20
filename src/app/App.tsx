@@ -26,7 +26,6 @@ import {
   ChevronDown,
   Link,
   FileText,
-  Eye,
   Image as ImageIcon,
   AlertTriangle,
   Loader,
@@ -401,7 +400,7 @@ function EditableBody({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       spellCheck={false}
-      placeholder="Start typing…"
+      placeholder={"請直接輸入文字內容\n可插入 Word 表格與圖片，右側會即時顯示"}
       className="w-full h-full resize-none bg-transparent text-foreground placeholder:text-muted-foreground/30 outline-none leading-relaxed"
       style={{
         fontFamily: "'JetBrains Mono', monospace",
@@ -419,7 +418,9 @@ function EditableBody({
 type TextBlock =
   | { type: "paragraph"; text: string }
   | { type: "table"; headers: string[]; rows: string[][] }
-  | { type: "image"; alt: string; src: string; widthPercent: number };
+  | { type: "image"; alt: string; src: string; widthPercent: number; lineIndex: number };
+
+const IMAGE_BLOCK_PATTERN = /^!\[(.*?)\]\((https?:\/\/[^\s)]+)\)(?:\{width=(\d{1,3})%\})?$/i;
 
 function splitTableCells(line: string) {
   return line
@@ -463,12 +464,12 @@ function askImageWidthPercent(defaultValue = 100) {
 function buildWordTableTemplate(rowCount: number, columnCount: number) {
   const safeRows = Math.max(1, Math.min(12, Math.floor(rowCount)));
   const safeColumns = Math.max(1, Math.min(8, Math.floor(columnCount)));
-  const makeRow = () => `|${Array.from({ length: safeColumns }, () => "   ").join("|")}|`;
+  const headers = `| ${Array.from({ length: safeColumns }, (_, index) => `欄位 ${index + 1}`).join(" | ")} |`;
   const separator = `|${Array.from({ length: safeColumns }, () => " --- ").join("|")}|`;
-  const rows = [makeRow(), separator];
+  const rows = [headers, separator];
 
-  for (let row = 0; row < Math.max(1, safeRows - 1); row += 1) {
-    rows.push(makeRow());
+  for (let row = 0; row < safeRows; row += 1) {
+    rows.push(`| ${Array.from({ length: safeColumns }, (_, column) => `內容 ${row + 1}-${column + 1}`).join(" | ")} |`);
   }
 
   return rows.join("\n");
@@ -488,13 +489,14 @@ function parseTextBlocks(content: string): TextBlock[] {
       continue;
     }
 
-    const imageMatch = trimmed.match(/^!\[(.*?)\]\((https?:\/\/[^\s)]+)\)(?:\{width=(\d{1,3})%\})?$/i);
+    const imageMatch = trimmed.match(IMAGE_BLOCK_PATTERN);
     if (imageMatch) {
       blocks.push({
         type: "image",
         alt: imageMatch[1].trim(),
         src: imageMatch[2].trim(),
         widthPercent: extractImageWidthPercent(imageMatch[3]),
+        lineIndex: index,
       });
       index += 1;
       continue;
@@ -526,7 +528,7 @@ function parseTextBlocks(content: string): TextBlock[] {
       const followingLine = lines[index + 1]?.trim() ?? "";
 
       if (!candidateTrimmed) break;
-      if (/^!\[(.*?)\]\((https?:\/\/[^\s)]+)\)(?:\{width=(\d{1,3})%\})?$/i.test(candidateTrimmed)) break;
+      if (IMAGE_BLOCK_PATTERN.test(candidateTrimmed)) break;
       if (candidateTrimmed.includes("|") && followingLine && isMarkdownTableSeparator(followingLine)) break;
 
       paragraphLines.push(candidate);
@@ -546,10 +548,12 @@ function RichTextPreview({
   value,
   fontSize,
   compact,
+  onImageWidthChange,
 }: {
   value: string;
   fontSize: number;
   compact: boolean;
+  onImageWidthChange?: (lineIndex: number, widthPercent: number) => void;
 }) {
   const blocks = useMemo(() => parseTextBlocks(value), [value]);
 
@@ -579,6 +583,39 @@ function RichTextPreview({
                   <figcaption className="mt-2 text-muted-foreground/80" style={{ fontFamily: "'Barlow', sans-serif", fontSize: `${Math.max(fontSize - 1, 11)}px` }}>
                     {block.alt}
                   </figcaption>
+                )}
+                {onImageWidthChange && (
+                  <div className={`mt-3 flex gap-2 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
+                    <button
+                      onClick={() => onImageWidthChange(block.lineIndex, clampImageWidthPercent(block.widthPercent - 10))}
+                      className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                      style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                    >
+                      縮小 10%
+                    </button>
+                    <input
+                      type="range"
+                      min={10}
+                      max={100}
+                      step={5}
+                      value={block.widthPercent}
+                      onChange={(event) => onImageWidthChange(block.lineIndex, Number(event.target.value))}
+                      className="flex-1 min-w-[120px]"
+                    />
+                    <button
+                      onClick={() => onImageWidthChange(block.lineIndex, clampImageWidthPercent(block.widthPercent + 10))}
+                      className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                      style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                    >
+                      放大 10%
+                    </button>
+                    <span
+                      className="text-primary"
+                      style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+                    >
+                      {block.widthPercent}%
+                    </span>
+                  </div>
                 )}
               </figure>
             );
@@ -647,7 +684,6 @@ function TextModeEditor({
   fontSize: number;
   compact: boolean;
 }) {
-  const [preview, setPreview] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -683,7 +719,6 @@ function TextModeEditor({
     const rows = Number.parseInt(rowInput.trim(), 10);
     const prefix = value && !value.endsWith("\n") ? "\n" : "";
     insertAtCursor(`${prefix}${buildWordTableTemplate(rows, columns)}\n`);
-    setPreview(false);
   }
 
   function insertImageTemplate() {
@@ -698,8 +733,22 @@ function TextModeEditor({
     if (widthPercent === null) return;
     const prefix = value && !value.endsWith("\n") ? "\n" : "";
     insertAtCursor(`${prefix}${buildImageSnippet(altText, trimmedUrl, widthPercent)}\n`);
-    setPreview(true);
   }
+
+  const updateImageWidth = useCallback((lineIndex: number, widthPercent: number) => {
+    const lines = value.replace(/\r\n/g, "\n").split("\n");
+    const originalLine = lines[lineIndex];
+    if (originalLine === undefined) return;
+
+    const trimmedLine = originalLine.trim();
+    const imageMatch = trimmedLine.match(IMAGE_BLOCK_PATTERN);
+    if (!imageMatch) return;
+
+    const leadingWhitespace = originalLine.match(/^\s*/)?.[0] ?? "";
+    const trailingWhitespace = originalLine.match(/\s*$/)?.[0] ?? "";
+    lines[lineIndex] = `${leadingWhitespace}${buildImageSnippet(imageMatch[1], imageMatch[2], widthPercent)}${trailingWhitespace}`;
+    onChange(lines.join("\n"));
+  }, [onChange, value]);
 
   async function uploadImageFile(file: File) {
     if (!supabase) {
@@ -741,7 +790,6 @@ function TextModeEditor({
 
       const prefix = value && !value.endsWith("\n") ? "\n" : "";
       insertAtCursor(`${prefix}${buildImageSnippet(fileBaseName, data.publicUrl, widthPercent)}\n`);
-      setPreview(true);
       setUploadMessage("圖片已上傳並插入");
     } catch (error) {
       setUploadMessage(error instanceof Error ? error.message : "圖片上傳失敗");
@@ -796,22 +844,10 @@ function TextModeEditor({
           <ImageIcon size={11} strokeWidth={2} />
           插入圖片網址
         </button>
-        <button
-          onClick={() => setPreview((current) => !current)}
-          className={`flex items-center justify-center gap-1.5 px-3 py-1.5 border transition-colors ${
-            preview
-              ? "border-primary/50 bg-primary/20 text-primary"
-              : "border-border bg-secondary text-foreground hover:bg-white/5"
-          }`}
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          <Eye size={11} strokeWidth={2} />
-          {preview ? "預覽中" : "預覽"}
-        </button>
       </div>
 
       <div className="text-muted-foreground/60 flex-shrink-0" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
-        支援 Word 風格表格與 <code>![圖片說明](圖片網址){"{width=60%}"}</code> 語法，可直接上傳到 Supabase Storage
+        可直接輸入文字、插入帶文字的 Word 風格表格，並用 <code>![圖片說明](圖片網址){"{width=60%}"}</code> 顯示與調整圖片大小
       </div>
 
       {uploadMessage && (
@@ -825,18 +861,29 @@ function TextModeEditor({
         </div>
       )}
 
-      <div className="flex-1 min-h-0">
-        {preview ? (
-          <RichTextPreview value={value} fontSize={fontSize} compact={compact} />
-        ) : (
-          <EditableBody
-            value={value}
-            onChange={onChange}
-            fontSize={fontSize}
-            compact={compact}
-            textareaRef={textareaRef}
-          />
-        )}
+      <div className={`flex-1 min-h-0 ${compact ? "flex flex-col gap-3" : "flex gap-3"}`}>
+        <div className="min-h-0 flex-1 border border-border bg-background/30 p-2">
+          <div className="mb-2 text-muted-foreground/70" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}>
+            文字內容
+          </div>
+          <div className="h-[calc(100%-24px)] min-h-[180px]">
+            <EditableBody
+              value={value}
+              onChange={onChange}
+              fontSize={fontSize}
+              compact={compact}
+              textareaRef={textareaRef}
+            />
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 border border-border bg-background/30 p-2">
+          <div className="mb-2 text-muted-foreground/70" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}>
+            即時顯示
+          </div>
+          <div className="h-[calc(100%-24px)] min-h-[180px]">
+            <RichTextPreview value={value} fontSize={fontSize} compact={compact} onImageWidthChange={updateImageWidth} />
+          </div>
+        </div>
       </div>
     </div>
   );
