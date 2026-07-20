@@ -278,6 +278,11 @@ function scaleLayoutToCols(layout: Layout[], targetCols: number) {
 function estimateMobileRows(panel: PanelData, item: Layout) {
   if (panel.mode === "api") return Math.max(item.h, item.minH ?? 4, 8);
   if (panel.mode === "live" || panel.mode === "embed") return Math.max(item.h, item.minH ?? 4, 10);
+  if (panel.mode === "text" && panel.content.startsWith(FLOATING_CANVAS_PREFIX)) {
+    const canvasDoc = parseFloatingCanvasDocument(panel.content);
+    const estimatedRows = Math.ceil((canvasDoc.canvasHeight + 56) / 34);
+    return Math.max(item.h, item.minH ?? 4, Math.min(32, estimatedRows));
+  }
   if (/!\[[^\]]*\]\([^)]+\)/.test(panel.content)) return Math.max(item.h, item.minH ?? 4, 14);
   if (/(^|\n)\s*\|.+\|\s*(\n|$)/.test(panel.content)) return Math.max(item.h, item.minH ?? 4, 12);
 
@@ -673,33 +678,282 @@ function RichTextPreview({
   );
 }
 
-type EditorBlock =
-  | { type: "paragraph"; text: string }
-  | { type: "table"; markdown: string }
-  | { type: "image"; alt: string; src: string; widthPercent: number };
+const FLOATING_CANVAS_PREFIX = "<!--dashboard-canvas-v2:";
+const FLOATING_CANVAS_SUFFIX = "-->";
+const DEFAULT_CANVAS_HEIGHT = 720;
+const DEFAULT_FLOATING_ITEM_WIDTH = 320;
+const DEFAULT_FLOATING_ITEM_HEIGHT = 220;
+const DEFAULT_TABLE_COLUMN_WIDTH = 140;
+const MIN_FLOATING_ITEM_WIDTH = 180;
+const MIN_FLOATING_ITEM_HEIGHT = 120;
+const CANVAS_SAFE_PADDING = 24;
+const SNAP_DISTANCE = 12;
 
-function parseEditorBlocks(content: string): EditorBlock[] {
+type FloatingImageItem = {
+  id: string;
+  type: "image";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  locked: boolean;
+  alt: string;
+  src: string;
+  lockAspectRatio: boolean;
+  aspectRatio: number;
+};
+
+type FloatingTableItem = {
+  id: string;
+  type: "table";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  locked: boolean;
+  headers: string[];
+  rows: string[][];
+  columnWidths: number[];
+};
+
+type FloatingTextItem = {
+  id: string;
+  type: "text";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  locked: boolean;
+  text: string;
+};
+
+type FloatingItem = FloatingImageItem | FloatingTableItem | FloatingTextItem;
+
+interface FloatingCanvasDocument {
+  version: 2;
+  text: string;
+  items: FloatingItem[];
+  canvasHeight: number;
+}
+
+interface SnapGuides {
+  x: number | null;
+  y: number | null;
+}
+
+interface TableSelection {
+  itemId: string;
+  rowIndex: number;
+  columnIndex: number;
+  area: "header" | "body";
+}
+
+type CanvasInteraction =
+  | {
+    mode: "move";
+    itemIds: string[];
+    startX: number;
+    startY: number;
+    origins: Record<string, { x: number; y: number }>;
+  }
+  | {
+    mode: "resize";
+    itemId: string;
+    startX: number;
+    startY: number;
+    originWidth: number;
+    originHeight: number;
+  }
+  | {
+    mode: "column-resize";
+    itemId: string;
+    columnIndex: number;
+    startX: number;
+    originColumnWidths: number[];
+  };
+
+function createFloatingItemId() {
+  return crypto.randomUUID();
+}
+
+function createFloatingTextItem(x = 48, y = 120): FloatingTextItem {
+  return {
+    id: createFloatingItemId(),
+    type: "text",
+    x,
+    y,
+    width: 320,
+    height: 180,
+    rotation: 0,
+    locked: false,
+    text: "請輸入文字方塊內容",
+  };
+}
+
+function estimateCanvasTextHeight(text: string) {
+  const lines = text.split("\n");
+  const wrappedLines = lines.reduce((total, line) => total + Math.max(1, Math.ceil(Math.max(line.length, 1) / 42)), 0);
+  return 120 + wrappedLines * 22;
+}
+
+function computeCanvasHeight(text: string, items: FloatingItem[], preferredHeight?: number) {
+  const textHeight = estimateCanvasTextHeight(text);
+  const itemBottom = items.reduce((maxBottom, item) => Math.max(maxBottom, item.y + item.height + CANVAS_SAFE_PADDING), 0);
+  return Math.max(DEFAULT_CANVAS_HEIGHT, preferredHeight ?? 0, textHeight, itemBottom);
+}
+
+function normalizeTableRows(rows: string[][], columnCount: number) {
+  return rows.map((row) => Array.from({ length: columnCount }, (_, index) => row[index] ?? ""));
+}
+
+function createFloatingTableItem(rowCount: number, columnCount: number, x = 48, y = 160): FloatingTableItem {
+  const safeRows = Math.max(1, Math.min(12, Math.floor(rowCount)));
+  const safeColumns = Math.max(1, Math.min(8, Math.floor(columnCount)));
+  const headers = Array.from({ length: safeColumns }, (_, index) => `欄位 ${index + 1}`);
+  const rows = Array.from({ length: safeRows }, (_, rowIndex) =>
+    Array.from({ length: safeColumns }, (_, columnIndex) => `內容 ${rowIndex + 1}-${columnIndex + 1}`));
+
+  return {
+    id: createFloatingItemId(),
+    type: "table",
+    x,
+    y,
+    width: Math.max(DEFAULT_FLOATING_ITEM_WIDTH, safeColumns * 140),
+    height: Math.max(DEFAULT_FLOATING_ITEM_HEIGHT, 120 + safeRows * 42),
+    rotation: 0,
+    locked: false,
+    headers,
+    rows,
+    columnWidths: Array.from({ length: safeColumns }, () => DEFAULT_TABLE_COLUMN_WIDTH),
+  };
+}
+
+function sanitizeFloatingItem(item: FloatingItem, index: number): FloatingItem {
+  const safeX = Number.isFinite(item.x) ? Math.max(0, Math.round(item.x)) : 24;
+  const safeY = Number.isFinite(item.y) ? Math.max(0, Math.round(item.y)) : 120 + index * 36;
+  const safeWidth = Number.isFinite(item.width) ? Math.max(MIN_FLOATING_ITEM_WIDTH, Math.round(item.width)) : DEFAULT_FLOATING_ITEM_WIDTH;
+  const safeHeight = Number.isFinite(item.height) ? Math.max(MIN_FLOATING_ITEM_HEIGHT, Math.round(item.height)) : DEFAULT_FLOATING_ITEM_HEIGHT;
+
+  if (item.type === "image") {
+    return {
+      ...item,
+      id: item.id || createFloatingItemId(),
+      x: safeX,
+      y: safeY,
+      width: safeWidth,
+      height: safeHeight,
+      rotation: Number.isFinite(item.rotation) ? item.rotation : 0,
+      locked: Boolean(item.locked),
+      alt: typeof item.alt === "string" ? item.alt : "",
+      src: typeof item.src === "string" ? item.src : "",
+      lockAspectRatio: item.lockAspectRatio !== false,
+      aspectRatio: Number.isFinite(item.aspectRatio) && item.aspectRatio > 0 ? item.aspectRatio : Math.max(1, safeWidth / Math.max(safeHeight, 1)),
+    };
+  }
+
+  if (item.type === "text") {
+    return {
+      ...item,
+      id: item.id || createFloatingItemId(),
+      x: safeX,
+      y: safeY,
+      width: safeWidth,
+      height: safeHeight,
+      rotation: Number.isFinite(item.rotation) ? item.rotation : 0,
+      locked: Boolean(item.locked),
+      text: typeof item.text === "string" ? item.text : "",
+    };
+  }
+
+  const columnCount = Math.max(1, item.headers.length);
+  const headers = Array.from({ length: columnCount }, (_, columnIndex) => item.headers[columnIndex] ?? `欄位 ${columnIndex + 1}`);
+  const rows = normalizeTableRows(item.rows, columnCount);
+  const columnWidths = Array.from({ length: columnCount }, (_, columnIndex) =>
+    Math.max(80, Math.round(item.columnWidths[columnIndex] ?? DEFAULT_TABLE_COLUMN_WIDTH)));
+
+  return {
+    ...item,
+    id: item.id || createFloatingItemId(),
+    x: safeX,
+    y: safeY,
+    width: safeWidth,
+    height: safeHeight,
+    rotation: Number.isFinite(item.rotation) ? item.rotation : 0,
+    locked: Boolean(item.locked),
+    headers,
+    rows,
+    columnWidths,
+  };
+}
+
+function sanitizeFloatingCanvasDocument(doc: Partial<FloatingCanvasDocument>): FloatingCanvasDocument {
+  const safeText = typeof doc.text === "string" ? doc.text : "";
+  const rawItems = Array.isArray(doc.items) ? doc.items : [];
+  const items = rawItems
+    .filter((item): item is FloatingItem => Boolean(item) && typeof item === "object" && "type" in item)
+    .map((item, index) => sanitizeFloatingItem(item, index));
+
+  return {
+    version: 2,
+    text: safeText,
+    items,
+    canvasHeight: computeCanvasHeight(safeText, items, typeof doc.canvasHeight === "number" ? doc.canvasHeight : undefined),
+  };
+}
+
+function serializeFloatingCanvasDocument(doc: FloatingCanvasDocument) {
+  const normalized = sanitizeFloatingCanvasDocument(doc);
+  return `${FLOATING_CANVAS_PREFIX}${encodeURIComponent(JSON.stringify(normalized))}${FLOATING_CANVAS_SUFFIX}`;
+}
+
+function parseMarkdownTableBlock(markdown: string) {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length < 2) return null;
+  const headers = splitTableCells(lines[0]);
+  const rows = lines.slice(2).map(splitTableCells);
+  return {
+    headers,
+    rows: normalizeTableRows(rows, headers.length),
+  };
+}
+
+function convertLegacyContentToFloatingCanvas(content: string): FloatingCanvasDocument {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
-  const blocks: EditorBlock[] = [];
+  const textLines: string[] = [];
+  const items: FloatingItem[] = [];
   let index = 0;
+  let nextItemY = 180;
 
   while (index < lines.length) {
     const currentLine = lines[index];
     const trimmed = currentLine.trim();
 
     if (!trimmed) {
+      textLines.push("");
       index += 1;
       continue;
     }
 
     const imageMatch = trimmed.match(IMAGE_BLOCK_PATTERN);
     if (imageMatch) {
-      blocks.push({
+      items.push(sanitizeFloatingItem({
+        id: createFloatingItemId(),
         type: "image",
+        x: 48,
+        y: nextItemY,
+        width: DEFAULT_FLOATING_ITEM_WIDTH,
+        height: DEFAULT_FLOATING_ITEM_HEIGHT,
+        rotation: 0,
+        locked: false,
         alt: imageMatch[1].trim(),
         src: imageMatch[2].trim(),
-        widthPercent: extractImageWidthPercent(imageMatch[3]),
-      });
+        lockAspectRatio: true,
+        aspectRatio: DEFAULT_FLOATING_ITEM_WIDTH / DEFAULT_FLOATING_ITEM_HEIGHT,
+      }, items.length));
+      nextItemY += DEFAULT_FLOATING_ITEM_HEIGHT + 24;
       index += 1;
       continue;
     }
@@ -717,54 +971,43 @@ function parseEditorBlocks(content: string): EditorBlock[] {
         index += 1;
       }
 
-      blocks.push({
-        type: "table",
-        markdown: tableLines.join("\n"),
-      });
-      continue;
+      const parsedTable = parseMarkdownTableBlock(tableLines.join("\n"));
+      if (parsedTable) {
+        items.push(sanitizeFloatingItem({
+          ...createFloatingTableItem(parsedTable.rows.length || 1, parsedTable.headers.length || 1, 48, nextItemY),
+          headers: parsedTable.headers,
+          rows: parsedTable.rows,
+          columnWidths: Array.from({ length: parsedTable.headers.length || 1 }, () => DEFAULT_TABLE_COLUMN_WIDTH),
+        }, items.length));
+        nextItemY += DEFAULT_FLOATING_ITEM_HEIGHT + 32;
+        continue;
+      }
     }
 
-    const paragraphLines = [currentLine];
+    textLines.push(currentLine);
     index += 1;
-
-    while (index < lines.length) {
-      const candidate = lines[index];
-      const candidateTrimmed = candidate.trim();
-      const followingLine = lines[index + 1]?.trim() ?? "";
-
-      if (!candidateTrimmed) break;
-      if (IMAGE_BLOCK_PATTERN.test(candidateTrimmed)) break;
-      if (candidateTrimmed.includes("|") && followingLine && isMarkdownTableSeparator(followingLine)) break;
-
-      paragraphLines.push(candidate);
-      index += 1;
-    }
-
-    blocks.push({
-      type: "paragraph",
-      text: paragraphLines.join("\n"),
-    });
   }
 
-  return blocks.length ? blocks : [{ type: "paragraph", text: "" }];
+  return sanitizeFloatingCanvasDocument({
+    version: 2,
+    text: textLines.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
+    items,
+    canvasHeight: computeCanvasHeight(textLines.join("\n"), items),
+  });
 }
 
-function serializeEditorBlocks(blocks: EditorBlock[]) {
-  const normalizedBlocks = blocks.length ? blocks : [{ type: "paragraph", text: "" } satisfies EditorBlock];
+function parseFloatingCanvasDocument(content: string): FloatingCanvasDocument {
+  if (content.startsWith(FLOATING_CANVAS_PREFIX) && content.endsWith(FLOATING_CANVAS_SUFFIX)) {
+    try {
+      const encoded = content.slice(FLOATING_CANVAS_PREFIX.length, -FLOATING_CANVAS_SUFFIX.length);
+      const parsed = JSON.parse(decodeURIComponent(encoded)) as Partial<FloatingCanvasDocument>;
+      return sanitizeFloatingCanvasDocument(parsed);
+    } catch {
+      return convertLegacyContentToFloatingCanvas(content);
+    }
+  }
 
-  return normalizedBlocks
-    .map((block) => {
-      if (block.type === "image") {
-        return buildImageSnippet(block.alt, block.src, block.widthPercent);
-      }
-
-      if (block.type === "table") {
-        return block.markdown.trim();
-      }
-
-      return block.text;
-    })
-    .join("\n\n");
+  return convertLegacyContentToFloatingCanvas(content);
 }
 
 function TextModeEditor({
@@ -778,54 +1021,324 @@ function TextModeEditor({
   fontSize: number;
   compact: boolean;
 }) {
-  const blocks = useMemo(() => parseEditorBlocks(value), [value]);
-  const [activeIndex, setActiveIndex] = useState(0);
-  const [draggingImageIndex, setDraggingImageIndex] = useState<number | null>(null);
-  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const doc = useMemo(() => parseFloatingCanvasDocument(value), [value]);
+  const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
+  const [interaction, setInteraction] = useState<CanvasInteraction | null>(null);
+  const [snapGuides, setSnapGuides] = useState<SnapGuides>({ x: null, y: null });
+  const [tableSelection, setTableSelection] = useState<TableSelection | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const clipboardRef = useRef<FloatingItem[]>([]);
 
-  const commitBlocks = useCallback((nextBlocks: EditorBlock[]) => {
-    onChange(serializeEditorBlocks(nextBlocks));
+  const commitDocument = useCallback((nextDoc: FloatingCanvasDocument) => {
+    onChange(serializeFloatingCanvasDocument(nextDoc));
   }, [onChange]);
 
-  function updateBlock(index: number, nextBlock: EditorBlock) {
-    const nextBlocks = [...blocks];
-    nextBlocks[index] = nextBlock;
-    commitBlocks(nextBlocks);
+  const updateDocument = useCallback((updater: (currentDoc: FloatingCanvasDocument) => FloatingCanvasDocument) => {
+    commitDocument(updater(doc));
+  }, [commitDocument, doc]);
+
+  const selectedItems = doc.items.filter((item) => selectedItemIds.includes(item.id));
+  const selectedItem = selectedItems.at(-1) ?? null;
+
+  useEffect(() => {
+    if (selectedItemIds.some((itemId) => !doc.items.some((item) => item.id === itemId))) {
+      setSelectedItemIds((current) => current.filter((itemId) => doc.items.some((item) => item.id === itemId)));
+    }
+  }, [doc.items, selectedItemIds]);
+
+  function selectItem(itemId: string, additive = false) {
+    setSelectedItemIds((current) => {
+      if (additive) {
+        return current.includes(itemId)
+          ? current.filter((id) => id !== itemId)
+          : [...current, itemId];
+      }
+
+      return [itemId];
+    });
   }
 
-  function insertBlockAt(index: number, block: EditorBlock) {
-    const nextBlocks = [...blocks];
-    nextBlocks.splice(index, 0, block);
-    commitBlocks(nextBlocks);
-    setActiveIndex(index);
+  function updateItem(itemId: string, updater: (item: FloatingItem) => FloatingItem) {
+    updateDocument((currentDoc) => ({
+      ...currentDoc,
+      items: currentDoc.items.map((item, index) =>
+        item.id === itemId ? sanitizeFloatingItem(updater(item), index) : item),
+    }));
   }
 
-  function insertBlockAfterActive(block: EditorBlock) {
-    const insertionIndex = Math.min(Math.max(activeIndex, 0) + 1, blocks.length);
-    insertBlockAt(insertionIndex, block);
+  function removeItems(itemIds: string[]) {
+    if (!itemIds.length) return;
+    const itemSet = new Set(itemIds);
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: currentDoc.items.filter((item) => !itemSet.has(item.id)),
+    }));
+    setSelectedItemIds((current) => current.filter((itemId) => !itemSet.has(itemId)));
+    setTableSelection((current) => (current && itemSet.has(current.itemId) ? null : current));
   }
 
-  function removeBlock(index: number) {
-    const nextBlocks = blocks.filter((_, blockIndex) => blockIndex !== index);
-    commitBlocks(nextBlocks.length ? nextBlocks : [{ type: "paragraph", text: "" }]);
-    setActiveIndex(Math.max(0, Math.min(index - 1, nextBlocks.length - 1)));
+  function removeItem(itemId: string) {
+    removeItems([itemId]);
   }
 
-  function moveBlock(fromIndex: number, toIndex: number) {
-    if (fromIndex === toIndex || fromIndex + 1 === toIndex) return;
-    const nextBlocks = [...blocks];
-    const [movingBlock] = nextBlocks.splice(fromIndex, 1);
-    const adjustedIndex = toIndex > fromIndex ? toIndex - 1 : toIndex;
-    nextBlocks.splice(adjustedIndex, 0, movingBlock);
-    commitBlocks(nextBlocks);
-    setActiveIndex(adjustedIndex);
+  function moveItemLayer(itemId: string, direction: "forward" | "backward") {
+    updateDocument((currentDoc) => {
+      const index = currentDoc.items.findIndex((item) => item.id === itemId);
+      if (index === -1) return currentDoc;
+
+      const targetIndex = direction === "forward"
+        ? Math.min(currentDoc.items.length - 1, index + 1)
+        : Math.max(0, index - 1);
+
+      if (targetIndex === index) return currentDoc;
+
+      const nextItems = [...currentDoc.items];
+      const [movingItem] = nextItems.splice(index, 1);
+      nextItems.splice(targetIndex, 0, movingItem);
+
+      return sanitizeFloatingCanvasDocument({
+        ...currentDoc,
+        items: nextItems,
+      });
+    });
   }
 
-  function insertTextBlock() {
-    insertBlockAfterActive({ type: "paragraph", text: "" });
+  function moveSelectedItemsBy(dx: number, dy: number) {
+    if (!selectedItemIds.length) return;
+    const selectedSet = new Set(selectedItemIds);
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: currentDoc.items.map((item) => {
+        if (!selectedSet.has(item.id) || item.locked) return item;
+        return {
+          ...item,
+          x: Math.max(0, item.x + dx),
+          y: Math.max(0, item.y + dy),
+        };
+      }),
+    }));
+  }
+
+  function rotateSelectedItems(delta: number) {
+    if (!selectedItemIds.length) return;
+    const selectedSet = new Set(selectedItemIds);
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: currentDoc.items.map((item) => {
+        if (!selectedSet.has(item.id) || item.locked) return item;
+        return {
+          ...item,
+          rotation: item.rotation + delta,
+        };
+      }),
+    }));
+  }
+
+  function toggleLockSelectedItems() {
+    if (!selectedItems.length) return;
+    const nextLocked = !selectedItems.every((item) => item.locked);
+    const selectedSet = new Set(selectedItemIds);
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: currentDoc.items.map((item) => selectedSet.has(item.id) ? { ...item, locked: nextLocked } : item),
+    }));
+  }
+
+  function toggleImageAspectLock(itemId: string) {
+    updateItem(itemId, (currentItem) => currentItem.type === "image"
+      ? { ...currentItem, lockAspectRatio: !currentItem.lockAspectRatio }
+      : currentItem);
+  }
+
+  function cloneItem(item: FloatingItem, offsetMultiplier: number) {
+    const offset = 24 * offsetMultiplier;
+    if (item.type === "image") {
+      return {
+        ...item,
+        id: createFloatingItemId(),
+        x: item.x + offset,
+        y: item.y + offset,
+      } satisfies FloatingImageItem;
+    }
+
+    if (item.type === "table") {
+      return {
+        ...item,
+        id: createFloatingItemId(),
+        x: item.x + offset,
+        y: item.y + offset,
+        headers: [...item.headers],
+        rows: item.rows.map((row) => [...row]),
+        columnWidths: [...item.columnWidths],
+      } satisfies FloatingTableItem;
+    }
+
+    return {
+      ...item,
+      id: createFloatingItemId(),
+      x: item.x + offset,
+      y: item.y + offset,
+    } satisfies FloatingTextItem;
+  }
+
+  function copySelectedItems() {
+    if (!selectedItems.length) return;
+    clipboardRef.current = selectedItems.map((item, index) => cloneItem(item, index + 1));
+  }
+
+  function pasteClipboardItems() {
+    if (!clipboardRef.current.length) return;
+    const pastedItems = clipboardRef.current.map((item, index) => cloneItem(item, index + 1));
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: [...currentDoc.items, ...pastedItems],
+    }));
+    setSelectedItemIds(pastedItems.map((item) => item.id));
+  }
+
+  function duplicateSelectedItems() {
+    copySelectedItems();
+    pasteClipboardItems();
+  }
+
+  function getDefaultItemPosition() {
+    const maxBottom = doc.items.reduce((bottom, item) => Math.max(bottom, item.y + item.height), 120);
+    return {
+      x: 48 + (doc.items.length % 3) * 24,
+      y: Math.min(maxBottom + 24, Math.max(160, doc.canvasHeight - 260)),
+    };
+  }
+
+  function insertTextBox() {
+    const { x, y } = getDefaultItemPosition();
+    const nextTextBox = createFloatingTextItem(x, y);
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: [...currentDoc.items, nextTextBox],
+    }));
+    setSelectedItemIds([nextTextBox.id]);
+  }
+
+  function createWrapTextBoxesForItem(itemId: string) {
+    const targetItem = doc.items.find((item) => item.id === itemId);
+    const canvasWidth = canvasRef.current?.clientWidth ?? 960;
+    if (!targetItem) return;
+
+    const wrapItems: FloatingTextItem[] = [];
+    const leftWidth = targetItem.x - CANVAS_SAFE_PADDING - 12;
+    const rightStart = targetItem.x + targetItem.width + 12;
+    const rightWidth = canvasWidth - rightStart - CANVAS_SAFE_PADDING;
+
+    if (leftWidth >= 220) {
+      wrapItems.push({
+        ...createFloatingTextItem(CANVAS_SAFE_PADDING, targetItem.y),
+        width: Math.min(320, leftWidth),
+        height: Math.max(120, Math.min(260, targetItem.height)),
+        text: "左側繞排文字",
+      });
+    }
+
+    if (rightWidth >= 220) {
+      wrapItems.push({
+        ...createFloatingTextItem(rightStart, targetItem.y),
+        width: Math.min(320, rightWidth),
+        height: Math.max(120, Math.min(260, targetItem.height)),
+        text: "右側繞排文字",
+      });
+    }
+
+    wrapItems.push({
+      ...createFloatingTextItem(targetItem.x, targetItem.y + targetItem.height + 16),
+      width: Math.max(260, Math.min(targetItem.width, canvasWidth - targetItem.x - CANVAS_SAFE_PADDING)),
+      height: 160,
+      text: "下方延伸文字",
+    });
+
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: [...currentDoc.items, ...wrapItems],
+    }));
+    setSelectedItemIds(wrapItems.map((item) => item.id));
+  }
+
+  function addTableRow(itemId: string, insertIndex?: number) {
+    updateItem(itemId, (currentItem) => {
+      if (currentItem.type !== "table") return currentItem;
+      const targetIndex = typeof insertIndex === "number"
+        ? Math.max(0, Math.min(currentItem.rows.length, insertIndex))
+        : currentItem.rows.length;
+      return {
+        ...currentItem,
+        rows: [
+          ...currentItem.rows.slice(0, targetIndex),
+          currentItem.headers.map((_, columnIndex) => `內容 ${targetIndex + 1}-${columnIndex + 1}`),
+          ...currentItem.rows.slice(targetIndex),
+        ],
+        height: currentItem.height + 42,
+      };
+    });
+  }
+
+  function removeTableRow(itemId: string, rowIndex?: number) {
+    updateItem(itemId, (currentItem) => {
+      if (currentItem.type !== "table" || currentItem.rows.length <= 1) return currentItem;
+      const targetIndex = typeof rowIndex === "number"
+        ? Math.max(0, Math.min(currentItem.rows.length - 1, rowIndex))
+        : currentItem.rows.length - 1;
+      return {
+        ...currentItem,
+        rows: currentItem.rows.filter((_, index) => index !== targetIndex),
+        height: Math.max(MIN_FLOATING_ITEM_HEIGHT, currentItem.height - 42),
+      };
+    });
+  }
+
+  function addTableColumn(itemId: string, insertIndex?: number) {
+    updateItem(itemId, (currentItem) => {
+      if (currentItem.type !== "table") return currentItem;
+      const targetIndex = typeof insertIndex === "number"
+        ? Math.max(0, Math.min(currentItem.headers.length, insertIndex))
+        : currentItem.headers.length;
+      return {
+        ...currentItem,
+        headers: [
+          ...currentItem.headers.slice(0, targetIndex),
+          `欄位 ${targetIndex + 1}`,
+          ...currentItem.headers.slice(targetIndex),
+        ],
+        rows: currentItem.rows.map((row, rowIndex) => [
+          ...row.slice(0, targetIndex),
+          `內容 ${rowIndex + 1}-${targetIndex + 1}`,
+          ...row.slice(targetIndex),
+        ]),
+        columnWidths: [
+          ...currentItem.columnWidths.slice(0, targetIndex),
+          DEFAULT_TABLE_COLUMN_WIDTH,
+          ...currentItem.columnWidths.slice(targetIndex),
+        ],
+        width: currentItem.width + DEFAULT_TABLE_COLUMN_WIDTH,
+      };
+    });
+  }
+
+  function removeTableColumn(itemId: string, columnIndex?: number) {
+    updateItem(itemId, (currentItem) => {
+      if (currentItem.type !== "table" || currentItem.headers.length <= 1) return currentItem;
+      const targetIndex = typeof columnIndex === "number"
+        ? Math.max(0, Math.min(currentItem.headers.length - 1, columnIndex))
+        : currentItem.headers.length - 1;
+      const removedWidth = currentItem.columnWidths[targetIndex] ?? DEFAULT_TABLE_COLUMN_WIDTH;
+      return {
+        ...currentItem,
+        headers: currentItem.headers.filter((_, index) => index !== targetIndex),
+        rows: currentItem.rows.map((row) => row.filter((_, index) => index !== targetIndex)),
+        columnWidths: currentItem.columnWidths.filter((_, index) => index !== targetIndex),
+        width: Math.max(MIN_FLOATING_ITEM_WIDTH, currentItem.width - removedWidth),
+      };
+    });
   }
 
   function insertTableTemplate() {
@@ -837,10 +1350,13 @@ function TextModeEditor({
 
     const columns = Number.parseInt(columnInput.trim(), 10);
     const rows = Number.parseInt(rowInput.trim(), 10);
-    insertBlockAfterActive({
-      type: "table",
-      markdown: buildWordTableTemplate(rows, columns),
-    });
+    const { x, y } = getDefaultItemPosition();
+    const nextTable = createFloatingTableItem(rows, columns, x, y);
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: [...currentDoc.items, nextTable],
+    }));
+    setSelectedItemIds([nextTable.id]);
   }
 
   function insertImageBlock(src: string, alt: string, widthPercent: number) {
@@ -850,12 +1366,29 @@ function TextModeEditor({
       return;
     }
 
-    insertBlockAfterActive({
+    const nextWidth = Math.max(MIN_FLOATING_ITEM_WIDTH, Math.round((clampImageWidthPercent(widthPercent) / 100) * 420));
+    const aspectRatio = 4 / 3;
+    const { x, y } = getDefaultItemPosition();
+    const nextImage: FloatingImageItem = {
+      id: createFloatingItemId(),
       type: "image",
+      x,
+      y,
+      width: nextWidth,
+      height: Math.max(MIN_FLOATING_ITEM_HEIGHT, Math.round(nextWidth / aspectRatio)),
+      rotation: 0,
+      locked: false,
       alt: alt.trim(),
       src: trimmedUrl,
-      widthPercent: clampImageWidthPercent(widthPercent),
-    });
+      lockAspectRatio: true,
+      aspectRatio,
+    };
+
+    updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+      ...currentDoc,
+      items: [...currentDoc.items, nextImage],
+    }));
+    setSelectedItemIds([nextImage.id]);
   }
 
   function insertImageTemplate() {
@@ -921,44 +1454,230 @@ function TextModeEditor({
     fileInputRef.current?.click();
   }
 
-  function renderInsertionBar(index: number) {
-    const isDropTarget = dropIndex === index;
-    return (
-      <div
-        key={`insert-${index}`}
-        onDragOver={(event) => {
-          if (draggingImageIndex === null) return;
-          event.preventDefault();
-          setDropIndex(index);
-        }}
-        onDragLeave={() => {
-          if (dropIndex === index) setDropIndex(null);
-        }}
-        onDrop={(event) => {
-          event.preventDefault();
-          if (draggingImageIndex !== null) {
-            moveBlock(draggingImageIndex, index);
-          }
-          setDraggingImageIndex(null);
-          setDropIndex(null);
-        }}
-        className={`rounded border border-dashed px-2 py-1.5 transition-colors ${
-          isDropTarget
-            ? "border-primary bg-primary/10"
-            : "border-border/60 bg-background/20 hover:border-primary/40"
-        }`}
-      >
-        <button
-          onClick={() => insertBlockAt(index, { type: "paragraph", text: "" })}
-          className="flex w-full items-center justify-center gap-1.5 text-muted-foreground hover:text-foreground transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          <Plus size={10} strokeWidth={2.5} />
-          {draggingImageIndex !== null ? "拖曳圖片到這裡，或加入文字" : "在這裡加入文字"}
-        </button>
-      </div>
-    );
+  function beginMove(event: React.MouseEvent, item: FloatingItem) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (item.locked) return;
+
+    const activeIds = selectedItemIds.includes(item.id) ? selectedItemIds : [item.id];
+    const movableIds = activeIds.filter((itemId) => {
+      const currentItem = doc.items.find((candidate) => candidate.id === itemId);
+      return currentItem && !currentItem.locked;
+    });
+
+    setSelectedItemIds(activeIds);
+    setInteraction({
+      mode: "move",
+      itemIds: movableIds,
+      startX: event.clientX,
+      startY: event.clientY,
+      origins: Object.fromEntries(movableIds.map((itemId) => {
+        const currentItem = doc.items.find((candidate) => candidate.id === itemId)!;
+        return [itemId, { x: currentItem.x, y: currentItem.y }];
+      })),
+    });
   }
+
+  function beginResize(event: React.MouseEvent, item: FloatingItem) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (item.locked) return;
+    setSelectedItemIds((current) => current.includes(item.id) ? current : [item.id]);
+    setInteraction({
+      mode: "resize",
+      itemId: item.id,
+      startX: event.clientX,
+      startY: event.clientY,
+      originWidth: item.width,
+      originHeight: item.height,
+    });
+  }
+
+  function beginColumnResize(event: React.MouseEvent, item: FloatingTableItem, columnIndex: number) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (item.locked) return;
+    setSelectedItemIds((current) => current.includes(item.id) ? current : [item.id]);
+    setInteraction({
+      mode: "column-resize",
+      itemId: item.id,
+      columnIndex,
+      startX: event.clientX,
+      originColumnWidths: [...item.columnWidths],
+    });
+  }
+
+  function snapAxis(position: number, size: number, candidateLines: number[]) {
+    const points = [
+      { line: position },
+      { line: position + size / 2 },
+      { line: position + size },
+    ];
+
+    let best: { position: number; guide: number } | null = null;
+
+    for (const candidate of candidateLines) {
+      for (const point of points) {
+        const delta = candidate - point.line;
+        if (Math.abs(delta) > SNAP_DISTANCE) continue;
+        const nextPosition = position + delta;
+        if (!best || Math.abs(delta) < Math.abs(best.position - position)) {
+          best = { position: nextPosition, guide: candidate };
+        }
+      }
+    }
+
+    return best ?? { position, guide: null };
+  }
+
+  useEffect(() => {
+    if (!interaction) return;
+
+    function handleMouseMove(event: MouseEvent) {
+      const canvasWidth = canvasRef.current?.clientWidth ?? 720;
+
+      if (interaction.mode === "move") {
+        const primaryId = interaction.itemIds.at(-1);
+        const primaryItem = doc.items.find((item) => item.id === primaryId);
+        if (!primaryItem) return;
+
+        const origin = interaction.origins[primaryItem.id];
+        const rawX = Math.max(0, Math.min(canvasWidth - primaryItem.width - CANVAS_SAFE_PADDING, origin.x + (event.clientX - interaction.startX)));
+        const rawY = Math.max(0, origin.y + (event.clientY - interaction.startY));
+        const siblingItems = doc.items.filter((item) => !interaction.itemIds.includes(item.id));
+        const xCandidates = [
+          CANVAS_SAFE_PADDING,
+          canvasWidth / 2,
+          canvasWidth - CANVAS_SAFE_PADDING,
+          ...siblingItems.flatMap((item) => [item.x, item.x + item.width / 2, item.x + item.width]),
+        ];
+        const yCandidates = [
+          CANVAS_SAFE_PADDING,
+          doc.canvasHeight / 2,
+          doc.canvasHeight - CANVAS_SAFE_PADDING,
+          ...siblingItems.flatMap((item) => [item.y, item.y + item.height / 2, item.y + item.height]),
+        ];
+
+        const snappedX = snapAxis(rawX, primaryItem.width, xCandidates);
+        const snappedY = snapAxis(rawY, primaryItem.height, yCandidates);
+        const deltaX = snappedX.position - origin.x;
+        const deltaY = snappedY.position - origin.y;
+        setSnapGuides({ x: snappedX.guide, y: snappedY.guide });
+
+        commitDocument(sanitizeFloatingCanvasDocument({
+          ...doc,
+          items: doc.items.map((item) => {
+            if (!interaction.itemIds.includes(item.id)) return item;
+            const itemOrigin = interaction.origins[item.id];
+            return {
+              ...item,
+              x: itemOrigin.x + deltaX,
+              y: itemOrigin.y + deltaY,
+            };
+          }),
+        }));
+        return;
+      }
+
+      setSnapGuides({ x: null, y: null });
+
+      const currentItem = doc.items.find((item) => item.id === interaction.itemId);
+      if (!currentItem) return;
+
+      if (interaction.mode === "resize") {
+        const nextWidth = Math.max(MIN_FLOATING_ITEM_WIDTH, Math.min(canvasWidth - currentItem.x - CANVAS_SAFE_PADDING, interaction.originWidth + (event.clientX - interaction.startX)));
+        const nextHeight = currentItem.type === "image" && currentItem.lockAspectRatio
+          ? Math.max(MIN_FLOATING_ITEM_HEIGHT, Math.round(nextWidth / Math.max(currentItem.aspectRatio, 0.1)))
+          : Math.max(MIN_FLOATING_ITEM_HEIGHT, interaction.originHeight + (event.clientY - interaction.startY));
+
+        commitDocument(sanitizeFloatingCanvasDocument({
+          ...doc,
+          items: doc.items.map((item) => item.id === interaction.itemId ? { ...item, width: nextWidth, height: nextHeight } : item),
+        }));
+        return;
+      }
+
+      const tableItem = currentItem.type === "table" ? currentItem : null;
+      if (!tableItem) return;
+
+      const deltaX = event.clientX - interaction.startX;
+      const nextColumnWidths = [...interaction.originColumnWidths];
+      nextColumnWidths[interaction.columnIndex] = Math.max(80, interaction.originColumnWidths[interaction.columnIndex] + deltaX);
+      const nextTableWidth = nextColumnWidths.reduce((sum, width) => sum + width, 0);
+
+      commitDocument(sanitizeFloatingCanvasDocument({
+        ...doc,
+        items: doc.items.map((item) => item.id === interaction.itemId
+          ? { ...tableItem, columnWidths: nextColumnWidths, width: Math.max(nextTableWidth + 24, item.width) }
+          : item),
+      }));
+    }
+
+    function handleMouseUp() {
+      setInteraction(null);
+      setSnapGuides({ x: null, y: null });
+    }
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [commitDocument, doc, interaction]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName?.toLowerCase();
+      const isTypingTarget = tagName === "input" || tagName === "textarea" || target?.isContentEditable;
+      const modifier = event.ctrlKey || event.metaKey;
+
+      if (modifier && event.key.toLowerCase() === "c" && selectedItemIds.length && !isTypingTarget) {
+        event.preventDefault();
+        copySelectedItems();
+        return;
+      }
+
+      if (modifier && event.key.toLowerCase() === "v" && !isTypingTarget) {
+        event.preventDefault();
+        pasteClipboardItems();
+        return;
+      }
+
+      if (modifier && event.key.toLowerCase() === "d" && selectedItemIds.length && !isTypingTarget) {
+        event.preventDefault();
+        duplicateSelectedItems();
+        return;
+      }
+
+      if (isTypingTarget || !selectedItemIds.length) return;
+
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        removeItems(selectedItemIds);
+        return;
+      }
+
+      const step = event.shiftKey ? 10 : 1;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        moveSelectedItemsBy(-step, 0);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        moveSelectedItemsBy(step, 0);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        moveSelectedItemsBy(0, -step);
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        moveSelectedItemsBy(0, step);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedItemIds, selectedItems]);
 
   return (
     <div className="h-full flex flex-col gap-2 min-h-0">
@@ -974,12 +1693,12 @@ function TextModeEditor({
       />
       <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
         <button
-          onClick={insertTextBlock}
+          onClick={insertTextBox}
           className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
           style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
         >
           <Plus size={11} strokeWidth={2.5} />
-          加入文字
+          文字方塊
         </button>
         <button
           onClick={insertTableTemplate}
@@ -1008,10 +1727,34 @@ function TextModeEditor({
           <ImageIcon size={11} strokeWidth={2} />
           插入圖片網址
         </button>
+        <button
+          onClick={copySelectedItems}
+          disabled={!selectedItems.length}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 disabled:opacity-50 transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          複製
+        </button>
+        <button
+          onClick={pasteClipboardItems}
+          disabled={!clipboardRef.current.length}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 disabled:opacity-50 transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          貼上
+        </button>
+        <button
+          onClick={duplicateSelectedItems}
+          disabled={!selectedItems.length}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 disabled:opacity-50 transition-colors"
+          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+        >
+          Duplicate
+        </button>
       </div>
 
       <div className="text-muted-foreground/60 flex-shrink-0" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
-        同一個視窗內可直接編輯文字、插入表格與圖片，圖片可拖曳調整位置，也可隨時改大小
+        同一個視窗內直接編輯文字，並可加入文字方塊、圖片與表格；支援多選、群組拖曳、複製貼上、旋轉、鎖定、吸附對齊與表格指定位置插入欄列
       </div>
 
       {uploadMessage && (
@@ -1025,190 +1768,355 @@ function TextModeEditor({
         </div>
       )}
 
-      <div className="flex-1 min-h-0 border border-border bg-background/30 p-2 overflow-auto" style={{ scrollbarWidth: "thin" }}>
-        <div className="mb-2 text-muted-foreground/70" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}>
-          單一編輯畫布
+      <div className="flex-1 min-h-0 border border-border bg-background/30 overflow-auto" style={{ scrollbarWidth: "thin" }}>
+        <div className="px-3 py-2 text-muted-foreground/70 border-b border-border" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}>
+          單一自由畫布
         </div>
-        <div className="flex flex-col gap-2">
-          {renderInsertionBar(0)}
-          {blocks.map((block, index) => (
-            <div key={`editor-block-${index}`} className="flex flex-col gap-2">
-              {block.type === "paragraph" && (
-                <div className="border border-border bg-background/50 p-2">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }} className="text-muted-foreground/70">
-                      文字
-                    </span>
-                    {blocks.length > 1 && (
-                      <button
-                        onClick={() => removeBlock(index)}
-                        className="text-muted-foreground hover:text-destructive transition-colors"
-                      >
-                        <X size={12} strokeWidth={2} />
-                      </button>
-                    )}
+        {selectedItem && (
+          <div className={`px-3 py-2 border-b border-border bg-background/30 ${compact ? "flex flex-col gap-2" : "flex items-center gap-2 flex-wrap"}`}>
+            <span className="text-muted-foreground/70" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
+              已選取：{selectedItems.length > 1 ? `${selectedItems.length} 個物件` : selectedItem.type === "image" ? "圖片" : selectedItem.type === "table" ? "表格" : "文字方塊"}
+            </span>
+            <button
+              onClick={() => moveItemLayer(selectedItem.id, "backward")}
+              className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              移到後面
+            </button>
+            <button
+              onClick={() => moveItemLayer(selectedItem.id, "forward")}
+              className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              移到前面
+            </button>
+            <button
+              onClick={() => rotateSelectedItems(-15)}
+              className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              左轉 15°
+            </button>
+            <button
+              onClick={() => rotateSelectedItems(15)}
+              className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              右轉 15°
+            </button>
+            <button
+              onClick={toggleLockSelectedItems}
+              className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              {selectedItems.every((item) => item.locked) ? "解除鎖定" : "鎖定物件"}
+            </button>
+            <button
+              onClick={duplicateSelectedItems}
+              className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              Duplicate
+            </button>
+            <button
+              onClick={() => createWrapTextBoxesForItem(selectedItem.id)}
+              className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              建立繞排文字方塊
+            </button>
+            {selectedItem.type === "image" && (
+              <button
+                onClick={() => toggleImageAspectLock(selectedItem.id)}
+                className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+              >
+                {selectedItem.lockAspectRatio ? "解除比例鎖定" : "鎖定圖片比例"}
+              </button>
+            )}
+            {selectedItem.type === "table" && (
+              <>
+                <button
+                  onClick={() => addTableRow(selectedItem.id, tableSelection?.itemId === selectedItem.id && tableSelection.area === "body" ? tableSelection.rowIndex : 0)}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  在上方加列
+                </button>
+                <button
+                  onClick={() => addTableRow(selectedItem.id, tableSelection?.itemId === selectedItem.id && tableSelection.area === "body" ? tableSelection.rowIndex + 1 : undefined)}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  在下方加列
+                </button>
+                <button
+                  onClick={() => removeTableRow(selectedItem.id, tableSelection?.itemId === selectedItem.id && tableSelection.area === "body" ? tableSelection.rowIndex : undefined)}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  刪除此列
+                </button>
+                <button
+                  onClick={() => addTableColumn(selectedItem.id, tableSelection?.itemId === selectedItem.id ? tableSelection.columnIndex : 0)}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  在左側加欄
+                </button>
+                <button
+                  onClick={() => addTableColumn(selectedItem.id, tableSelection?.itemId === selectedItem.id ? tableSelection.columnIndex + 1 : undefined)}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  在右側加欄
+                </button>
+                <button
+                  onClick={() => removeTableColumn(selectedItem.id, tableSelection?.itemId === selectedItem.id ? tableSelection.columnIndex : undefined)}
+                  className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                >
+                  刪除此欄
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        <div
+          ref={canvasRef}
+          className="relative min-w-full bg-background/10"
+          style={{ height: `${doc.canvasHeight}px` }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setSelectedItemIds([]);
+              setTableSelection(null);
+            }
+          }}
+        >
+          <textarea
+            value={doc.text}
+            onChange={(event) => updateDocument((currentDoc) => sanitizeFloatingCanvasDocument({
+              ...currentDoc,
+              text: event.target.value,
+            }))}
+            placeholder={"請直接輸入文字內容\n圖片與表格可在這張畫布上自由移動"}
+            className="absolute inset-0 w-full h-full resize-none bg-transparent text-foreground placeholder:text-muted-foreground/30 outline-none"
+            style={{
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: `${fontSize}px`,
+              lineHeight: 1.7,
+              padding: "18px",
+              whiteSpace: "pre-wrap",
+              overflow: "hidden",
+              wordBreak: compact ? "break-word" : "normal",
+            }}
+          />
+
+          {snapGuides.x !== null && (
+            <div
+              className="absolute top-0 bottom-0 w-px bg-primary/70 pointer-events-none"
+              style={{ left: `${snapGuides.x}px` }}
+            />
+          )}
+          {snapGuides.y !== null && (
+            <div
+              className="absolute left-0 right-0 h-px bg-primary/70 pointer-events-none"
+              style={{ top: `${snapGuides.y}px` }}
+            />
+          )}
+
+          {doc.items.map((item, itemIndex) => (
+            <div
+              key={item.id}
+              className={`absolute border shadow-lg ${selectedItemIds.includes(item.id) ? "border-primary ring-1 ring-primary/60" : "border-border"} ${item.locked ? "opacity-95" : ""} bg-card/95 backdrop-blur-sm`}
+              style={{
+                left: `${item.x}px`,
+                top: `${item.y}px`,
+                width: `${item.width}px`,
+                height: `${item.height}px`,
+                zIndex: selectedItemIds.includes(item.id) ? 1000 + itemIndex : 100 + itemIndex,
+                transform: `rotate(${item.rotation}deg)`,
+                transformOrigin: "center",
+              }}
+              onMouseDown={(event) => {
+                event.stopPropagation();
+                selectItem(item.id, event.shiftKey);
+              }}
+            >
+              <div
+                className="flex items-center justify-between gap-2 border-b border-border bg-background/80 px-2 py-1 cursor-move"
+                onMouseDown={(event) => beginMove(event, item)}
+              >
+                <div className="flex items-center gap-2 text-muted-foreground/70">
+                  <GripVertical size={12} strokeWidth={2.2} />
+                  <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
+                    {item.type === "image" ? "圖片物件" : item.type === "table" ? "表格物件" : "文字方塊"}{item.locked ? " 已鎖定" : ""}
+                  </span>
+                </div>
+                <button
+                  onClick={() => removeItem(item.id)}
+                  className="text-muted-foreground hover:text-destructive transition-colors"
+                >
+                  <X size={12} strokeWidth={2} />
+                </button>
+              </div>
+
+              {item.type === "image" ? (
+                <div className="flex h-[calc(100%-29px)] flex-col gap-2 p-2">
+                  <div className="flex-1 overflow-hidden bg-black/20">
+                    <img
+                      src={item.src}
+                      alt={item.alt || "Panel image"}
+                      className="w-full h-full object-contain"
+                      onLoad={(event) => {
+                        const target = event.currentTarget;
+                        if (!target.naturalWidth || !target.naturalHeight) return;
+                        const nextAspectRatio = target.naturalWidth / target.naturalHeight;
+                        if (Math.abs(nextAspectRatio - item.aspectRatio) > 0.05) {
+                          updateItem(item.id, (currentItem) => currentItem.type === "image"
+                            ? { ...currentItem, aspectRatio: nextAspectRatio, height: currentItem.lockAspectRatio ? Math.max(MIN_FLOATING_ITEM_HEIGHT, Math.round(currentItem.width / nextAspectRatio)) : currentItem.height }
+                            : currentItem);
+                        }
+                      }}
+                      loading="lazy"
+                    />
                   </div>
+                  <input
+                    value={item.alt}
+                    disabled={item.locked}
+                    onChange={(event) => updateItem(item.id, (currentItem) => currentItem.type === "image"
+                      ? { ...currentItem, alt: event.target.value }
+                      : currentItem)}
+                    placeholder="圖片說明"
+                    className="w-full border border-border bg-transparent px-2 py-1 text-foreground outline-none"
+                    style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}
+                  />
+                  <div className={`flex gap-2 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
+                    <span className="text-primary" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
+                      {Math.round((item.width / 420) * 100)}%
+                    </span>
+                    <button
+                      onClick={() => updateItem(item.id, (currentItem) => currentItem.type === "image"
+                        ? {
+                          ...currentItem,
+                          width: Math.max(MIN_FLOATING_ITEM_WIDTH, currentItem.width - 40),
+                          height: currentItem.lockAspectRatio
+                            ? Math.max(MIN_FLOATING_ITEM_HEIGHT, Math.round(Math.max(MIN_FLOATING_ITEM_WIDTH, currentItem.width - 40) / currentItem.aspectRatio))
+                            : currentItem.height,
+                        }
+                        : currentItem)}
+                      className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                      style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                    >
+                      縮小
+                    </button>
+                    <button
+                      onClick={() => updateItem(item.id, (currentItem) => currentItem.type === "image"
+                        ? {
+                          ...currentItem,
+                          width: currentItem.width + 40,
+                          height: currentItem.lockAspectRatio
+                            ? Math.max(MIN_FLOATING_ITEM_HEIGHT, Math.round((currentItem.width + 40) / currentItem.aspectRatio))
+                            : currentItem.height,
+                        }
+                        : currentItem)}
+                      className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                      style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                    >
+                      放大
+                    </button>
+                  </div>
+                </div>
+              ) : item.type === "text" ? (
+                <div className="h-[calc(100%-29px)] p-2">
                   <textarea
-                    value={block.text}
-                    onFocus={() => setActiveIndex(index)}
-                    onChange={(event) => updateBlock(index, { ...block, text: event.target.value })}
-                    placeholder="請在這裡輸入文字"
-                    className="w-full resize-none bg-transparent text-foreground placeholder:text-muted-foreground/30 outline-none leading-relaxed"
-                    rows={Math.max(4, block.text.split("\n").length + 1)}
+                    value={item.text}
+                    disabled={item.locked}
+                    onChange={(event) => updateItem(item.id, (currentItem) => currentItem.type === "text"
+                      ? { ...currentItem, text: event.target.value }
+                      : currentItem)}
+                    placeholder="請輸入文字方塊內容"
+                    className="w-full h-full resize-none bg-transparent text-foreground placeholder:text-muted-foreground/30 outline-none"
                     style={{
                       fontFamily: "'JetBrains Mono', monospace",
                       fontSize: `${fontSize}px`,
+                      lineHeight: 1.7,
                       whiteSpace: "pre-wrap",
-                      overflowX: compact ? "hidden" : "auto",
-                      wordBreak: compact ? "break-word" : "normal",
+                      wordBreak: "break-word",
                     }}
                   />
                 </div>
-              )}
-
-              {block.type === "table" && (
-                <div className="border border-border bg-background/50 p-2">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }} className="text-muted-foreground/70">
-                      表格
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => setActiveIndex(index)}
-                        className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-                        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
-                      >
-                        之後插入
-                      </button>
-                      {blocks.length > 1 && (
-                        <button
-                          onClick={() => removeBlock(index)}
-                          className="text-muted-foreground hover:text-destructive transition-colors"
-                        >
-                          <X size={12} strokeWidth={2} />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  <textarea
-                    value={block.markdown}
-                    onFocus={() => setActiveIndex(index)}
-                    onChange={(event) => updateBlock(index, { ...block, markdown: event.target.value })}
-                    className="w-full resize-none bg-transparent text-foreground outline-none leading-relaxed"
-                    rows={Math.max(5, block.markdown.split("\n").length + 1)}
-                    style={{
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: `${Math.max(fontSize - 1, 11)}px`,
-                      whiteSpace: "pre",
-                      overflowX: "auto",
-                    }}
-                  />
+              ) : (
+                <div className="h-[calc(100%-29px)] overflow-auto p-2" style={{ scrollbarWidth: "thin" }}>
+                  <table className="border-collapse" style={{ tableLayout: "fixed", minWidth: "100%" }}>
+                    <colgroup>
+                      {item.columnWidths.map((width, columnIndex) => (
+                        <col key={`col-${item.id}-${columnIndex}`} style={{ width: `${width}px` }} />
+                      ))}
+                    </colgroup>
+                    <thead>
+                      <tr>
+                        {item.headers.map((header, columnIndex) => (
+                          <th key={`header-${item.id}-${columnIndex}`} className={`relative border border-border p-0 align-top ${tableSelection?.itemId === item.id && tableSelection.columnIndex === columnIndex && tableSelection.area === "header" ? "bg-primary/20" : "bg-background/70"}`}>
+                            <input
+                              value={header}
+                              disabled={item.locked}
+                              onFocus={() => setTableSelection({ itemId: item.id, rowIndex: 0, columnIndex, area: "header" })}
+                              onChange={(event) => updateItem(item.id, (currentItem) => {
+                                if (currentItem.type !== "table") return currentItem;
+                                const nextHeaders = [...currentItem.headers];
+                                nextHeaders[columnIndex] = event.target.value;
+                                return { ...currentItem, headers: nextHeaders };
+                              })}
+                              className="w-full bg-transparent px-2 py-2 text-foreground outline-none"
+                              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: `${Math.max(fontSize - 1, 11)}px`, fontWeight: 700 }}
+                            />
+                            <div
+                              className="absolute right-0 top-0 h-full w-2 cursor-col-resize"
+                              onMouseDown={(event) => beginColumnResize(event, item, columnIndex)}
+                            />
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {item.rows.map((row, rowIndex) => (
+                        <tr key={`row-${item.id}-${rowIndex}`}>
+                          {row.map((cell, cellIndex) => (
+                            <td key={`cell-${item.id}-${rowIndex}-${cellIndex}`} className={`border p-0 align-top ${tableSelection?.itemId === item.id && tableSelection.rowIndex === rowIndex && tableSelection.columnIndex === cellIndex && tableSelection.area === "body" ? "border-primary bg-primary/10" : "border-border bg-background/40"}`}>
+                              <textarea
+                                value={cell}
+                                disabled={item.locked}
+                                onFocus={() => setTableSelection({ itemId: item.id, rowIndex, columnIndex: cellIndex, area: "body" })}
+                                onChange={(event) => updateItem(item.id, (currentItem) => {
+                                  if (currentItem.type !== "table") return currentItem;
+                                  const nextRows = currentItem.rows.map((currentRow) => [...currentRow]);
+                                  nextRows[rowIndex][cellIndex] = event.target.value;
+                                  return { ...currentItem, rows: nextRows };
+                                })}
+                                className="w-full resize-none bg-transparent px-2 py-2 text-foreground outline-none"
+                                rows={Math.max(2, cell.split("\n").length)}
+                                style={{ fontFamily: "'Barlow', sans-serif", fontSize: `${Math.max(fontSize - 1, 11)}px`, whiteSpace: "pre-wrap" }}
+                              />
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
 
-              {block.type === "image" && (
-                <figure
-                  draggable
-                  onDragStart={() => {
-                    setDraggingImageIndex(index);
-                    setActiveIndex(index);
-                  }}
-                  onDragEnd={() => {
-                    setDraggingImageIndex(null);
-                    setDropIndex(null);
-                  }}
-                  className={`border border-border bg-background/50 p-2 ${draggingImageIndex === index ? "opacity-60" : ""}`}
-                >
-                  <div className={`mb-2 flex gap-2 ${compact ? "flex-col" : "items-center justify-between"}`}>
-                    <div className="flex items-center gap-2 text-muted-foreground/70">
-                      <GripVertical size={12} strokeWidth={2.2} />
-                      <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
-                        拖曳圖片可移動位置
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => moveBlock(index, index)}
-                        className="hidden"
-                      />
-                      <button
-                        onClick={() => setActiveIndex(index)}
-                        className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-                        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
-                      >
-                        之後插入
-                      </button>
-                      {blocks.length > 1 && (
-                        <button
-                          onClick={() => removeBlock(index)}
-                          className="text-muted-foreground hover:text-destructive transition-colors"
-                        >
-                          <X size={12} strokeWidth={2} />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  <img
-                    src={block.src}
-                    alt={block.alt || "Panel image"}
-                    className="h-auto object-contain bg-black/20"
-                    style={{ width: `${block.widthPercent}%`, maxWidth: "100%" }}
-                    loading="lazy"
-                  />
-                  <div className="mt-3 flex flex-col gap-2">
-                    <input
-                      value={block.alt}
-                      onFocus={() => setActiveIndex(index)}
-                      onChange={(event) => updateBlock(index, { ...block, alt: event.target.value })}
-                      placeholder="圖片說明"
-                      className="w-full bg-transparent border border-border px-2 py-1 text-foreground outline-none"
-                      style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}
-                    />
-                    <div className={`flex gap-2 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
-                      <button
-                        onClick={() => updateBlock(index, { ...block, widthPercent: clampImageWidthPercent(block.widthPercent - 10) })}
-                        className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-                        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
-                      >
-                        縮小 10%
-                      </button>
-                      <input
-                        type="range"
-                        min={10}
-                        max={100}
-                        step={5}
-                        value={block.widthPercent}
-                        onChange={(event) => updateBlock(index, { ...block, widthPercent: Number(event.target.value) })}
-                        className="flex-1 min-w-[120px]"
-                      />
-                      <button
-                        onClick={() => updateBlock(index, { ...block, widthPercent: clampImageWidthPercent(block.widthPercent + 10) })}
-                        className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-                        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
-                      >
-                        放大 10%
-                      </button>
-                      <span
-                        className="text-primary"
-                        style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-                      >
-                        {block.widthPercent}%
-                      </span>
-                    </div>
-                  </div>
-                </figure>
-              )}
-              {renderInsertionBar(index + 1)}
+              <div
+                className={`absolute bottom-1 right-1 h-4 w-4 rounded-sm border border-border bg-background/80 ${item.locked ? "cursor-not-allowed opacity-50" : "cursor-se-resize"}`}
+                onMouseDown={(event) => beginResize(event, item)}
+              />
             </div>
           ))}
-          {!blocks.length && (
-            <div className="border border-border bg-background/50 p-3 text-center text-muted-foreground/60" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "12px" }}>
-              尚未輸入內容
-            </div>
-          )}
-          <div className="text-muted-foreground/50" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
-            提示：先點選想接續的位置，再按上方工具列插入文字、表格或圖片；拖曳圖片上方把手可改變位置。
-          </div>
+        </div>
+        <div className="border-t border-border px-3 py-2 text-muted-foreground/50" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
+          提示：可用 Shift 多選物件並群組拖曳；`Ctrl/Cmd + C` 複製、`Ctrl/Cmd + V` 貼上、`Ctrl/Cmd + D` duplicate；方向鍵微調位置，Shift + 方向鍵快速移動；選取表格儲存格後可在指定位置插入欄列。
         </div>
       </div>
     </div>
