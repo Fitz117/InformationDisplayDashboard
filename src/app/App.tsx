@@ -1056,9 +1056,11 @@ function TextModeEditor({
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+  const [toolbarExpanded, setToolbarExpanded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const clipboardRef = useRef<FloatingItem[]>([]);
+  const toolbarRef = useRef<HTMLDivElement>(null);
 
   const commitDocument = useCallback((nextDoc: FloatingCanvasDocument) => {
     onChange(serializeFloatingCanvasDocument(nextDoc));
@@ -1070,6 +1072,22 @@ function TextModeEditor({
 
   const selectedItems = doc.items.filter((item) => selectedItemIds.includes(item.id));
   const selectedItem = selectedItems.at(-1) ?? null;
+
+  function clearCanvasSelection() {
+    setSelectedItemIds([]);
+    setTableSelection(null);
+  }
+
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      if (toolbarRef.current && !toolbarRef.current.contains(event.target as Node)) {
+        setToolbarExpanded(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, []);
 
   useEffect(() => {
     if (selectedItemIds.some((itemId) => !doc.items.some((item) => item.id === itemId))) {
@@ -1870,120 +1888,136 @@ function TextModeEditor({
           if (file) void uploadImageFile(file);
         }}
       />
-      <div className={`flex gap-2 flex-shrink-0 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
-        <button
-          onClick={insertTextBox}
-          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          <Plus size={11} strokeWidth={2.5} />
-          文字方塊
-        </button>
-        <button
-          onClick={insertTableTemplate}
-          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          <Table2 size={11} strokeWidth={2} />
-          Word 表格
-        </button>
-        <button
-          onClick={handleSelectUpload}
-          disabled={uploadingImage}
-          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-primary/40 bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          {uploadingImage
-            ? <Loader size={11} strokeWidth={2} className="animate-spin" />
-            : <ImageIcon size={11} strokeWidth={2} />}
-          {uploadingImage ? "上傳中" : "上傳圖片"}
-        </button>
-        <button
-          onClick={insertImageTemplate}
-          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          <ImageIcon size={11} strokeWidth={2} />
-          插入圖片網址
-        </button>
-        <button
-          onClick={copySelectedItems}
-          disabled={!selectedItems.length}
-          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 disabled:opacity-50 transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          複製
-        </button>
-        <button
-          onClick={pasteClipboardItems}
-          disabled={!clipboardRef.current.length}
-          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 disabled:opacity-50 transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          貼上
-        </button>
-        <button
-          onClick={duplicateSelectedItems}
-          disabled={!selectedItems.length}
-          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 disabled:opacity-50 transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          Duplicate
-        </button>
-        <button
-          onClick={() => setSelectionMode((current) => !current)}
-          className={`flex items-center justify-center gap-1.5 px-3 py-1.5 border transition-colors ${selectionMode ? "border-primary bg-primary/20 text-primary" : "border-border bg-secondary text-foreground hover:bg-white/5"}`}
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          框選模式
-        </button>
-        <button
-          onClick={copyCanvasToAnotherPanel}
-          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          複製到其他 Panel
-        </button>
-        <button
-          onClick={exportCanvasLayout}
-          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          匯出配置
-        </button>
-        <button
-          onClick={importCanvasLayout}
-          className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
-        >
-          匯入配置
-        </button>
-        <div className="flex items-center gap-1 border border-border bg-secondary px-1 py-0.5">
-          <span className="text-muted-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
-            背景文字
-          </span>
+      <div ref={toolbarRef} className="flex flex-col gap-2 flex-shrink-0">
+        <div className={`flex gap-2 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
           <button
-            onClick={() => updateCanvasTextFontSize(doc.textFontSize - 1)}
-            className="w-5 h-5 flex items-center justify-center text-accent hover:text-foreground transition-colors"
-            style={{ fontSize: "14px", lineHeight: 1 }}
+            onClick={() => setToolbarExpanded((current) => !current)}
+            className={`flex items-center justify-center gap-1.5 px-3 py-1.5 border transition-colors ${toolbarExpanded ? "border-primary bg-primary/20 text-primary" : "border-border bg-secondary text-foreground hover:bg-white/5"}`}
+            style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
           >
-            -
+            <ChevronDown size={11} strokeWidth={2.2} className={`transition-transform ${toolbarExpanded ? "rotate-180" : ""}`} />
+            工具
           </button>
-          <span className="w-7 text-center text-accent" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", fontWeight: 600 }}>
-            {doc.textFontSize}
-          </span>
-          <button
-            onClick={() => updateCanvasTextFontSize(doc.textFontSize + 1)}
-            className="w-5 h-5 flex items-center justify-center text-accent hover:text-foreground transition-colors"
-            style={{ fontSize: "14px", lineHeight: 1 }}
-          >
-            +
-          </button>
+          {!toolbarExpanded && (
+            <span className="text-muted-foreground/60" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
+              點擊打開插入物件或調整大小，可加入文字方塊、圖片與表格
+            </span>
+          )}
         </div>
-      </div>
 
-      <div className="text-muted-foreground/60 flex-shrink-0" style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}>
-        同一個視窗內直接編輯文字，並可加入文字方塊、圖片與表格；支援多選、群組拖曳、複製貼上、旋轉、鎖定、吸附對齊與表格指定位置插入欄列
+        {toolbarExpanded && (
+          <div className={`flex gap-2 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
+            <button
+              onClick={insertTextBox}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              <Plus size={11} strokeWidth={2.5} />
+              文字方塊
+            </button>
+            <button
+              onClick={insertTableTemplate}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              <Table2 size={11} strokeWidth={2} />
+              Word 表格
+            </button>
+            <button
+              onClick={handleSelectUpload}
+              disabled={uploadingImage}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-primary/40 bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              {uploadingImage
+                ? <Loader size={11} strokeWidth={2} className="animate-spin" />
+                : <ImageIcon size={11} strokeWidth={2} />}
+              {uploadingImage ? "上傳中" : "上傳圖片"}
+            </button>
+            <button
+              onClick={insertImageTemplate}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              <ImageIcon size={11} strokeWidth={2} />
+              插入圖片網址
+            </button>
+            <button
+              onClick={copySelectedItems}
+              disabled={!selectedItems.length}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 disabled:opacity-50 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              複製
+            </button>
+            <button
+              onClick={pasteClipboardItems}
+              disabled={!clipboardRef.current.length}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 disabled:opacity-50 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              貼上
+            </button>
+            <button
+              onClick={duplicateSelectedItems}
+              disabled={!selectedItems.length}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 disabled:opacity-50 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              Duplicate
+            </button>
+            <button
+              onClick={() => setSelectionMode((current) => !current)}
+              className={`flex items-center justify-center gap-1.5 px-3 py-1.5 border transition-colors ${selectionMode ? "border-primary bg-primary/20 text-primary" : "border-border bg-secondary text-foreground hover:bg-white/5"}`}
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              框選模式
+            </button>
+            <button
+              onClick={copyCanvasToAnotherPanel}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              複製到其他 Panel
+            </button>
+            <button
+              onClick={exportCanvasLayout}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              匯出配置
+            </button>
+            <button
+              onClick={importCanvasLayout}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
+            >
+              匯入配置
+            </button>
+            <div className="flex items-center gap-1 border border-border bg-secondary px-1 py-0.5">
+              <span className="text-muted-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
+                背景文字
+              </span>
+              <button
+                onClick={() => updateCanvasTextFontSize(doc.textFontSize - 1)}
+                className="w-5 h-5 flex items-center justify-center text-accent hover:text-foreground transition-colors"
+                style={{ fontSize: "14px", lineHeight: 1 }}
+              >
+                -
+              </button>
+              <span className="w-7 text-center text-accent" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", fontWeight: 600 }}>
+                {doc.textFontSize}
+              </span>
+              <button
+                onClick={() => updateCanvasTextFontSize(doc.textFontSize + 1)}
+                className="w-5 h-5 flex items-center justify-center text-accent hover:text-foreground transition-colors"
+                style={{ fontSize: "14px", lineHeight: 1 }}
+              >
+                +
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {uploadMessage && (
@@ -1998,9 +2032,6 @@ function TextModeEditor({
       )}
 
       <div className="flex-1 min-h-0 border border-border bg-background/30 overflow-auto" style={{ scrollbarWidth: "thin" }}>
-        <div className="px-3 py-2 text-muted-foreground/70 border-b border-border" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}>
-          單一自由畫布
-        </div>
         {selectedItem && (
           <div className={`px-3 py-2 border-b border-border bg-background/30 ${compact ? "flex flex-col gap-2" : "flex items-center gap-2 flex-wrap"}`}>
             <span className="text-muted-foreground/70" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
@@ -2202,8 +2233,7 @@ function TextModeEditor({
           style={{ height: `${doc.canvasHeight}px` }}
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) {
-              setSelectedItemIds([]);
-              setTableSelection(null);
+              clearCanvasSelection();
             }
           }}
         >
@@ -2215,6 +2245,8 @@ function TextModeEditor({
             }))}
             placeholder={"請直接輸入文字內容\n圖片與表格可在這張畫布上自由移動"}
             className="absolute inset-0 w-full h-full resize-none bg-transparent text-foreground placeholder:text-muted-foreground/30 outline-none"
+            onMouseDown={clearCanvasSelection}
+            onFocus={clearCanvasSelection}
             style={{
               fontFamily: "'JetBrains Mono', monospace",
               fontSize: `${doc.textFontSize}px`,
