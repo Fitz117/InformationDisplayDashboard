@@ -2341,7 +2341,7 @@ function TextModeEditor({
             >
               {(() => {
                 const isSelected = selectedItemIds.includes(item.id);
-                const showImageControls = item.type !== "image" || !compact || isSelected;
+                const showImageControls = item.type !== "image" || isSelected;
 
                 return (
                   <>
