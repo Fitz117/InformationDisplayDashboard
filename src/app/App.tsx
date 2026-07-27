@@ -35,6 +35,8 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Table2,
+  Download,
+  Upload,
 } from "lucide-react";
 import { supabase } from "../lib/supabase";
 
@@ -59,7 +61,15 @@ interface PanelData {
 }
 
 type PersistedPanelData = Omit<PanelData, "apiResponse" | "apiError" | "apiLoading">;
+type DashboardPanelSnapshot = PersistedPanelData & Pick<PanelData, "apiResponse" | "apiError" | "apiLoading">;
 type SyncState = "idle" | "saving" | "saved" | "error" | "offline";
+type DashboardSnapshot = {
+  version: 1;
+  exportedAt: string;
+  panels: DashboardPanelSnapshot[];
+  layout: Layout[];
+  darkMode?: boolean;
+};
 // ── Default panels ─────────────────────────────────────────────────────────────
 
 function makePanel(id: string, title: string, content: string): PanelData {
@@ -164,9 +174,15 @@ function toRuntimePanel(panel: Partial<PersistedPanelData> & { id: string }): Pa
     liveUrl: typeof panel.liveUrl === "string" ? panel.liveUrl : "",
     embedUrl: typeof panel.embedUrl === "string" ? panel.embedUrl : "",
     posterUrl: typeof panel.posterUrl === "string" ? panel.posterUrl : "",
-    apiResponse: null,
-    apiError: null,
-    apiLoading: false,
+    apiResponse: typeof (panel as Partial<DashboardPanelSnapshot>).apiResponse === "string"
+      ? (panel as Partial<DashboardPanelSnapshot>).apiResponse ?? null
+      : null,
+    apiError: typeof (panel as Partial<DashboardPanelSnapshot>).apiError === "string"
+      ? (panel as Partial<DashboardPanelSnapshot>).apiError ?? null
+      : null,
+    apiLoading: typeof (panel as Partial<DashboardPanelSnapshot>).apiLoading === "boolean"
+      ? (panel as Partial<DashboardPanelSnapshot>).apiLoading ?? false
+      : false,
   };
 }
 
@@ -226,6 +242,229 @@ function parseLayout(raw: unknown, panels: PanelData[]): Layout[] {
   });
 
   return parsed.length === panels.length ? parsed : buildFallbackLayout(panels);
+}
+
+function parseDashboardSnapshot(raw: unknown): DashboardSnapshot | null {
+  if (!raw || typeof raw !== "object") return null;
+  const candidate = raw as Partial<DashboardSnapshot>;
+  if (!Array.isArray(candidate.panels) || !Array.isArray(candidate.layout)) return null;
+
+  return {
+    version: 1,
+    exportedAt: typeof candidate.exportedAt === "string" ? candidate.exportedAt : new Date().toISOString(),
+    panels: candidate.panels as DashboardPanelSnapshot[],
+    layout: candidate.layout as Layout[],
+    darkMode: typeof candidate.darkMode === "boolean" ? candidate.darkMode : undefined,
+  };
+}
+
+function toDashboardSnapshotPanels(panels: PanelData[]): DashboardPanelSnapshot[] {
+  return panels.map((panel) => ({
+    ...toPersistedPanels([panel])[0],
+    apiResponse: panel.apiResponse,
+    apiError: panel.apiError,
+    apiLoading: panel.apiLoading,
+  }));
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderPlainTextHtml(text: string) {
+  return escapeHtml(text).replace(/\n/g, "<br />");
+}
+
+function renderTextBlocksHtml(content: string, fontSize: number) {
+  const blocks = parseTextBlocks(content);
+  if (!blocks.length) return `<p class="export-empty">尚未輸入內容</p>`;
+
+  return blocks.map((block) => {
+    if (block.type === "paragraph") {
+      return `<div class="export-text-block" style="font-size:${fontSize}px;">${renderPlainTextHtml(block.text)}</div>`;
+    }
+
+    if (block.type === "image") {
+      return `
+        <figure class="export-figure">
+          <img src="${escapeHtml(block.src)}" alt="${escapeHtml(block.alt || "Panel image")}" style="width:min(${block.widthPercent}%, 100%);" />
+          ${block.alt ? `<figcaption>${escapeHtml(block.alt)}</figcaption>` : ""}
+        </figure>
+      `;
+    }
+
+    const rows = [block.headers, ...block.rows];
+    return `
+      <div class="export-table-wrap">
+        <table class="export-table">
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                ${block.headers.map((_, cellIndex) => `<td>${escapeHtml(row[cellIndex] ?? "") || "&nbsp;"}</td>`).join("")}
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderFloatingCanvasHtml(content: string) {
+  const doc = parseFloatingCanvasDocument(content);
+  const itemsHtml = doc.items.map((item) => {
+    const commonStyle = `left:${item.x}px;top:${item.y}px;width:${item.width}px;height:${item.height}px;transform:rotate(${item.rotation}deg);`;
+    if (item.type === "image") {
+      return `
+        <div class="export-canvas-item export-canvas-image" style="${commonStyle}">
+          <img src="${escapeHtml(item.src)}" alt="${escapeHtml(item.alt || "Panel image")}" />
+          ${item.alt ? `<div class="export-canvas-caption">${escapeHtml(item.alt)}</div>` : ""}
+        </div>
+      `;
+    }
+
+    if (item.type === "text") {
+      return `
+        <div class="export-canvas-item export-canvas-textbox" style="${commonStyle}font-size:${item.fontSize}px;">
+          ${renderPlainTextHtml(item.text)}
+        </div>
+      `;
+    }
+
+    return `
+      <div class="export-canvas-item export-canvas-tablebox" style="${commonStyle}">
+        <table class="export-table">
+          <tbody>
+            <tr>${item.headers.map((header) => `<td>${escapeHtml(header)}</td>`).join("")}</tr>
+            ${item.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell) || "&nbsp;"}</td>`).join("")}</tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <div class="export-canvas" style="height:${doc.canvasHeight}px;">
+      <div class="export-canvas-base" style="font-size:${doc.textFontSize}px;">${renderPlainTextHtml(doc.text)}</div>
+      ${itemsHtml}
+    </div>
+  `;
+}
+
+function renderPanelBodyHtml(panel: DashboardPanelSnapshot) {
+  if (panel.mode === "text") {
+    return panel.content.startsWith(FLOATING_CANVAS_PREFIX)
+      ? renderFloatingCanvasHtml(panel.content)
+      : renderTextBlocksHtml(panel.content, panel.bodySize);
+  }
+
+  if (panel.mode === "api") {
+    const display = panel.apiError || panel.apiResponse || panel.content || panel.apiUrl || "尚未取得 API 資料";
+    return `<pre class="export-pre">${escapeHtml(display)}</pre>`;
+  }
+
+  if (panel.mode === "live") {
+    return `
+      <div class="export-link-block">
+        ${panel.posterUrl ? `<img class="export-poster" src="${escapeHtml(panel.posterUrl)}" alt="${escapeHtml(panel.title)}" />` : ""}
+        <p>直播來源：<a href="${escapeHtml(panel.liveUrl)}" target="_blank" rel="noreferrer">${escapeHtml(panel.liveUrl || "未設定")}</a></p>
+      </div>
+    `;
+  }
+
+  return panel.embedUrl
+    ? `<iframe class="export-iframe" src="${escapeHtml(panel.embedUrl)}" title="${escapeHtml(panel.title)}"></iframe>`
+    : `<p class="export-empty">尚未設定嵌入網址</p>`;
+}
+
+function buildDashboardExportHtml(snapshot: DashboardSnapshot) {
+  const orderedPanels = snapshot.layout
+    .slice()
+    .sort(sortLayoutItems)
+    .map((layoutItem) => {
+      const panel = snapshot.panels.find((candidate) => candidate.id === layoutItem.i);
+      return panel ? { panel, layoutItem } : null;
+    })
+    .filter((entry): entry is { panel: DashboardPanelSnapshot; layoutItem: Layout } => Boolean(entry));
+  const snapshotJson = JSON.stringify(snapshot, null, 2).replace(/<\/script/gi, "<\\/script");
+
+  return `<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard Export</title>
+  <style>
+    :root { color-scheme: ${snapshot.darkMode === false ? "light" : "dark"}; }
+    body { margin: 0; background: ${snapshot.darkMode === false ? "#f4f7fb" : "#060814"}; color: ${snapshot.darkMode === false ? "#111827" : "#f5f7fb"}; font-family: Arial, sans-serif; }
+    .page { padding: 20px; }
+    .meta { margin-bottom: 16px; font-size: 12px; opacity: 0.75; }
+    .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); grid-auto-rows: 38px; gap: 8px; }
+    .panel { border: 1px solid rgba(120,140,180,0.25); background: ${snapshot.darkMode === false ? "#ffffff" : "rgba(12,16,28,0.94)"}; overflow: hidden; min-width: 0; }
+    .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid rgba(120,140,180,0.2); }
+    .panel-title { font-size: 18px; font-weight: 700; letter-spacing: 0.04em; }
+    .panel-mode { font-size: 11px; opacity: 0.7; }
+    .panel-body { padding: 12px; height: calc(100% - 48px); overflow: auto; box-sizing: border-box; }
+    .export-text-block, .export-pre { white-space: pre-wrap; line-height: 1.7; word-break: break-word; }
+    .export-empty { opacity: 0.55; }
+    .export-figure { margin: 0; border: 1px solid rgba(120,140,180,0.2); padding: 8px; background: rgba(255,255,255,0.03); }
+    .export-figure img, .export-poster, .export-canvas-image img { max-width: 100%; height: auto; display: block; object-fit: contain; background: rgba(0,0,0,0.18); }
+    .export-figure figcaption, .export-canvas-caption { margin-top: 8px; font-size: 12px; opacity: 0.8; }
+    .export-table-wrap { overflow: auto; }
+    .export-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    .export-table td { border: 1px solid rgba(120,140,180,0.22); padding: 8px; vertical-align: top; white-space: pre-wrap; word-break: break-word; }
+    .export-link-block { display: flex; flex-direction: column; gap: 10px; }
+    .export-link-block a { color: #00c8ff; word-break: break-all; }
+    .export-iframe { width: 100%; height: 100%; min-height: 320px; border: 0; background: #000; }
+    .export-canvas { position: relative; overflow: hidden; border: 1px solid rgba(120,140,180,0.2); background: rgba(255,255,255,0.03); }
+    .export-canvas-base { position: absolute; inset: 0; padding: 18px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; font-family: monospace; }
+    .export-canvas-item { position: absolute; overflow: hidden; border: 1px solid rgba(120,140,180,0.22); background: ${snapshot.darkMode === false ? "#ffffff" : "rgba(12,16,28,0.96)"}; box-sizing: border-box; }
+    .export-canvas-textbox { padding: 10px; white-space: pre-wrap; word-break: break-word; line-height: 1.7; font-family: monospace; }
+    .export-canvas-tablebox { padding: 8px; }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; grid-auto-rows: auto; }
+      .panel { grid-column: auto !important; grid-row: auto !important; min-height: 320px; }
+      .export-canvas { min-height: 520px; height: auto !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>PNC Dashboard Export</h1>
+    <div class="meta">匯出時間：${escapeHtml(new Date(snapshot.exportedAt).toLocaleString())}</div>
+    <div class="grid">
+      ${orderedPanels.map(({ panel, layoutItem }) => `
+        <section class="panel" style="grid-column:${layoutItem.x + 1} / span ${layoutItem.w}; grid-row:${layoutItem.y + 1} / span ${layoutItem.h};">
+          <div class="panel-header">
+            <div class="panel-title" style="font-size:${panel.titleSize + 7}px;">${escapeHtml(panel.title)}</div>
+            <div class="panel-mode">${escapeHtml(panel.mode.toUpperCase())}</div>
+          </div>
+          <div class="panel-body">
+            ${renderPanelBodyHtml(panel)}
+          </div>
+        </section>
+      `).join("")}
+    </div>
+  </div>
+  <script id="dashboard-snapshot" type="application/json">${snapshotJson}</script>
+</body>
+</html>`;
+}
+
+function extractDashboardSnapshotFromHtml(html: string) {
+  const match = html.match(/<script[^>]*id=["']dashboard-snapshot["'][^>]*>([\s\S]*?)<\/script>/i);
+  if (!match) return null;
+
+  try {
+    return parseDashboardSnapshot(JSON.parse(match[1]));
+  } catch {
+    return null;
+  }
 }
 
 function syncUidCounter(panels: PanelData[]) {
@@ -3290,6 +3529,7 @@ export default function App() {
     document.documentElement.classList.add("dark");
     return true;
   });
+  const [transferMessage, setTransferMessage] = useState<string | null>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -3333,6 +3573,7 @@ export default function App() {
 
   const containerElRef = useRef<HTMLDivElement | null>(null);
   const saveTimeoutRef = useRef<number | null>(null);
+  const dashboardImportInputRef = useRef<HTMLInputElement>(null);
 
   const containerRef = useCallback((node: HTMLDivElement | null) => {
     containerElRef.current = node;
@@ -3553,6 +3794,72 @@ export default function App() {
     setLayout(DEFAULT_LAYOUT);
   }
 
+  function applyImportedDashboardSnapshot(snapshot: DashboardSnapshot) {
+    const nextPanels = parsePanels(snapshot.panels);
+    const nextLayout = parseLayout(snapshot.layout, nextPanels);
+    syncUidCounter(nextPanels);
+    setPanels(nextPanels);
+    setLayout(nextLayout);
+    if (typeof snapshot.darkMode === "boolean") setDarkMode(snapshot.darkMode);
+  }
+
+  function parseDashboardSnapshotInput(input: string) {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+
+    if (trimmed.startsWith("<")) {
+      return extractDashboardSnapshotFromHtml(trimmed);
+    }
+
+    try {
+      return parseDashboardSnapshot(JSON.parse(trimmed));
+    } catch {
+      return null;
+    }
+  }
+
+  async function exportDashboardSnapshot() {
+    const snapshot = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      panels: toDashboardSnapshotPanels(panels),
+      layout: ensureDesktopLayout(layout, panels),
+      darkMode,
+    } satisfies DashboardSnapshot;
+    const html = buildDashboardExportHtml(snapshot);
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const exportDate = snapshot.exportedAt.slice(0, 19).replace(/[:T]/g, "-");
+    link.href = url;
+    link.download = `dashboard-export-${exportDate}.html`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setTransferMessage("Dashboard HTML 已匯出");
+  }
+
+  function importDashboardSnapshot() {
+    setTransferMessage(null);
+    dashboardImportInputRef.current?.click();
+  }
+
+  async function handleDashboardImportFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const parsed = parseDashboardSnapshotInput(await file.text());
+      if (!parsed) throw new Error("無效的 Dashboard 匯出資料");
+      applyImportedDashboardSnapshot(parsed);
+      setTransferMessage("Dashboard 資料已匯入");
+    } catch {
+      setTransferMessage("匯入失敗，請確認選擇的是有效的 Dashboard HTML 或 JSON");
+    } finally {
+      event.target.value = "";
+    }
+  }
+
   function renderNavSection(items: ReadonlyArray<{ icon: React.ElementType; label: string; key: NavKey }>, mobile = false) {
     return items.map(({ icon: Icon, label, key }) => {
       const handleClick = () => {
@@ -3601,6 +3908,13 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background" style={{ fontFamily: "'Barlow', sans-serif" }}>
+      <input
+        ref={dashboardImportInputRef}
+        type="file"
+        accept=".html,.htm,.json,text/html,application/json"
+        className="hidden"
+        onChange={(event) => { void handleDashboardImportFile(event); }}
+      />
       {isPhone && mobileSidebarOpen && (
         <div className="fixed inset-0 z-50 flex">
           <button className="absolute inset-0 bg-black/60" onClick={() => setMobileSidebarOpen(false)} aria-label="Close menu" />
@@ -3737,6 +4051,24 @@ export default function App() {
           >
             {isPhone ? "RESET" : "RESET"}
           </button>
+          <button
+            onClick={exportDashboardSnapshot}
+            className={`${isPhone ? "px-2.5 py-1.5" : "px-3 py-1.5"} flex items-center gap-1.5 border border-border text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors`}
+            style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 600 }}
+            title="匯出整份 Dashboard"
+          >
+            <Download size={12} strokeWidth={2} />
+            {isPhone ? "OUT" : "EXPORT"}
+          </button>
+          <button
+            onClick={importDashboardSnapshot}
+            className={`${isPhone ? "px-2.5 py-1.5" : "px-3 py-1.5"} flex items-center gap-1.5 border border-border text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors`}
+            style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 600 }}
+            title="匯入整份 Dashboard"
+          >
+            <Upload size={12} strokeWidth={2} />
+            {isPhone ? "IN" : "IMPORT"}
+          </button>
           <div
             className={`px-3 py-1.5 border transition-colors ${syncClassName}`}
             style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "11px", letterSpacing: "0.08em", fontWeight: 700 }}
@@ -3769,6 +4101,16 @@ export default function App() {
 
         {/* Grid */}
         <div ref={containerRef} className="flex-1 overflow-y-auto overflow-x-hidden px-2" style={{ scrollbarWidth: "none" }}>
+          {transferMessage && (
+            <div className="px-1 pt-2">
+              <div
+                className={`border px-3 py-2 ${transferMessage.includes("失敗") ? "border-destructive/40 text-destructive" : "border-primary/30 text-primary"}`}
+                style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}
+              >
+                {transferMessage}
+              </div>
+            </div>
+          )}
           {useStackedLayout ? (
             <div className={`grid gap-2 py-2 ${isPhone ? "grid-cols-1" : "grid-cols-2"}`}>
               {orderedPanels.map((panel) => {
