@@ -2339,6 +2339,12 @@ function TextModeEditor({
                 selectItem(item.id, event.shiftKey);
               }}
             >
+              {(() => {
+                const isSelected = selectedItemIds.includes(item.id);
+                const showImageControls = item.type !== "image" || !compact || isSelected;
+
+                return (
+                  <>
               <div
                 className="flex items-center justify-between gap-2 border-b border-border bg-background/80 px-2 py-1 cursor-move"
                 onMouseDown={(event) => beginMove(event, item)}
@@ -2358,8 +2364,8 @@ function TextModeEditor({
               </div>
 
               {item.type === "image" ? (
-                <div className="flex h-[calc(100%-29px)] flex-col gap-2 p-2">
-                  <div className="flex-1 overflow-hidden bg-black/20">
+                <div className={`h-[calc(100%-29px)] p-2 ${showImageControls ? "flex flex-col gap-2" : ""}`}>
+                  <div className={`overflow-hidden bg-black/20 ${showImageControls ? "flex-1" : "h-full"}`}>
                     <img
                       src={item.src}
                       alt={item.alt || "Panel image"}
@@ -2377,51 +2383,55 @@ function TextModeEditor({
                       loading="lazy"
                     />
                   </div>
-                  <input
-                    value={item.alt}
-                    disabled={item.locked}
-                    onChange={(event) => updateItem(item.id, (currentItem) => currentItem.type === "image"
-                      ? { ...currentItem, alt: event.target.value }
-                      : currentItem)}
-                    placeholder="圖片說明"
-                    className="w-full border border-border bg-transparent px-2 py-1 text-foreground outline-none"
-                    style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}
-                  />
-                  <div className={`flex gap-2 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
-                    <span className="text-primary" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
-                      {Math.round((item.width / 420) * 100)}%
-                    </span>
-                    <button
-                      onClick={() => updateItem(item.id, (currentItem) => currentItem.type === "image"
-                        ? {
-                          ...currentItem,
-                          width: Math.max(MIN_FLOATING_ITEM_WIDTH, currentItem.width - 40),
-                          height: currentItem.lockAspectRatio
-                            ? Math.max(MIN_FLOATING_ITEM_HEIGHT, Math.round(Math.max(MIN_FLOATING_ITEM_WIDTH, currentItem.width - 40) / currentItem.aspectRatio))
-                            : currentItem.height,
-                        }
-                        : currentItem)}
-                      className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-                      style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
-                    >
-                      縮小
-                    </button>
-                    <button
-                      onClick={() => updateItem(item.id, (currentItem) => currentItem.type === "image"
-                        ? {
-                          ...currentItem,
-                          width: currentItem.width + 40,
-                          height: currentItem.lockAspectRatio
-                            ? Math.max(MIN_FLOATING_ITEM_HEIGHT, Math.round((currentItem.width + 40) / currentItem.aspectRatio))
-                            : currentItem.height,
-                        }
-                        : currentItem)}
-                      className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
-                      style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
-                    >
-                      放大
-                    </button>
-                  </div>
+                  {showImageControls && (
+                    <>
+                      <input
+                        value={item.alt}
+                        disabled={item.locked}
+                        onChange={(event) => updateItem(item.id, (currentItem) => currentItem.type === "image"
+                          ? { ...currentItem, alt: event.target.value }
+                          : currentItem)}
+                        placeholder="圖片說明"
+                        className="w-full border border-border bg-transparent px-2 py-1 text-foreground outline-none"
+                        style={{ fontFamily: "'Barlow', sans-serif", fontSize: "11px" }}
+                      />
+                      <div className={`flex gap-2 ${compact ? "flex-col" : "items-center flex-wrap"}`}>
+                        <span className="text-primary" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}>
+                          {Math.round((item.width / 420) * 100)}%
+                        </span>
+                        <button
+                          onClick={() => updateItem(item.id, (currentItem) => currentItem.type === "image"
+                            ? {
+                              ...currentItem,
+                              width: Math.max(MIN_FLOATING_ITEM_WIDTH, currentItem.width - 40),
+                              height: currentItem.lockAspectRatio
+                                ? Math.max(MIN_FLOATING_ITEM_HEIGHT, Math.round(Math.max(MIN_FLOATING_ITEM_WIDTH, currentItem.width - 40) / currentItem.aspectRatio))
+                                : currentItem.height,
+                            }
+                            : currentItem)}
+                          className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                        >
+                          縮小
+                        </button>
+                        <button
+                          onClick={() => updateItem(item.id, (currentItem) => currentItem.type === "image"
+                            ? {
+                              ...currentItem,
+                              width: currentItem.width + 40,
+                              height: currentItem.lockAspectRatio
+                                ? Math.max(MIN_FLOATING_ITEM_HEIGHT, Math.round((currentItem.width + 40) / currentItem.aspectRatio))
+                                : currentItem.height,
+                            }
+                            : currentItem)}
+                          className="px-2 py-1 border border-border bg-secondary text-foreground hover:bg-white/5 transition-colors"
+                          style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "10px", letterSpacing: "0.08em", fontWeight: 700 }}
+                        >
+                          放大
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               ) : item.type === "text" ? (
                 <div className="h-[calc(100%-29px)] p-2">
@@ -2535,6 +2545,9 @@ function TextModeEditor({
                 className={`absolute bottom-1 right-1 h-4 w-4 rounded-sm border border-border bg-background/80 ${item.locked ? "cursor-not-allowed opacity-50" : "cursor-se-resize"}`}
                 onMouseDown={(event) => beginResize(event, item)}
               />
+                  </>
+                );
+              })()}
             </div>
           ))}
         </div>
